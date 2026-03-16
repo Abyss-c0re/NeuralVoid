@@ -10,3 +10,4 @@ wheels/
 .venv
 .vscode/settings.json
 neuralcore.log
+local_pyproject.toml
