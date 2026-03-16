@@ -28,6 +28,7 @@ def main():
     client = LLMClient(
         base_url=base_url,
         model=model,
+        tokenizer= "Qwen/Qwen3.5-9B",
         extra_body={
             "presence_penalty": 1.5,
             "top_k": 20,
@@ -40,6 +41,7 @@ def main():
     reasoner = LLMClient(
         base_url=base_url,
         model=model,
+        tokenizer = client.tokenizer,
         extra_body={
             "presence_penalty": 1.2,
             "top_k": 30,
@@ -50,6 +52,7 @@ def main():
     embeddings = LLMClient(
         base_url=base_url,
         model="embedding-gemma-300m",
+        tokenizer = client.tokenizer
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -80,7 +83,7 @@ def main():
 
    
 
-    context_manager = ContextManager(client=embeddings)
+    context_manager = ContextManager(client=embeddings,tokenizer = client.tokenizer)
 
     app = LLMChatApp(
         client=client,
