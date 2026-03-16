@@ -4,33 +4,20 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-
-# Base dependencies
 dependencies = [
-    "textual>=8.1.1",
+    "neuralcore @ git+https://github.com/Abyss-c0re/NeuralCore.git",
+    "textual>=0.81.1",
 ]
-
-[project.optional-dependencies]
-dev = [
-    "neuralcore @ file:../NeuralCore"
-]
-
-prod = [
-    # Pull neuralcore directly from GitHub in production
-    "neuralcore @ git+https://github.com/Abyss-c0re/NeuralCore.git#egg=neuralcore",
-]
-
-[project.scripts]
-neuralcore = "neuralvoid:main"
 
 [tool.pyright]  
 venvPath = "."     
 venv = ".venv"
 
+[project.scripts]
+neuralcore = "neuralvoid:main"
+
 [build-system]
-requires = [
-    "setuptools>=65.0.0",      # ensures setup.py runs
-    "uv_build>=0.10.10,<0.11.0",
-    "toml>=0.10.2"
-]
+requires = ["uv_build>=0.10.10,<0.11.0", "toml>=0.10.2"]
 build-backend = "uv_build"
+
+
