@@ -100,7 +100,7 @@ class LLMChatApp(App):
         tools: Optional[
             Union[ActionSet, "DynamicActionManager", List[Dict[str, Any]]]
         ] = None,
-        history_manager: Optional[ContextManager] = None,
+        context_manager: Optional[ContextManager] = None,
         tool_rendering: Optional[str] = "off",
     ):
         super().__init__()
@@ -108,7 +108,7 @@ class LLMChatApp(App):
         self.client = client
         self.system_prompt = system_prompt
         self.tools = tools
-        self.history_manager = history_manager
+        self.context_manager = context_manager
         self.conversation = []
 
         self.rendering = get_renderer()
@@ -298,9 +298,9 @@ class LLMChatApp(App):
         ] + self.conversation[-15:]
 
         # Context enrichment (same logic as before)
-        if self.history_manager:
+        if self.context_manager:
             try:
-                context_history = await self.history_manager.generate_prompt(
+                context_history = await self.context_manager.generate_prompt(
                     prompt, num_messages=0
                 )
                 if context_history and context_history[-1].get("content"):
@@ -323,7 +323,7 @@ class LLMChatApp(App):
             user_prompt=prompt,
             messages_so_far=messages,
             tools=tools or [],
-            history_manager=self.history_manager,
+            context_manager=self.context_manager,
             max_iterations=35
         ):
             if event_type == "content_delta":

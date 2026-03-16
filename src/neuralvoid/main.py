@@ -80,13 +80,13 @@ def main():
 
    
 
-    history_manager = ContextManager(client=embeddings)
+    context_manager = ContextManager(client=embeddings)
 
     app = LLMChatApp(
         client=client,
         system_prompt=system_prompt,
         tools=dynamic_manager,  # ← works now
-        history_manager=history_manager,
+        context_manager=context_manager,
         tool_rendering="info",
     )
     app.run()
