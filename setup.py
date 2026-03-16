@@ -1,25 +1,33 @@
+import os
 import toml
 from setuptools import setup, find_packages
 
-# Load data from pyproject.toml
+# Load pyproject.toml
 pyproject = toml.load("pyproject.toml")
 project = pyproject["project"]
 
-# Extract project metadata from the pyproject.toml
+# Metadata
 name = project["name"]
 version = project["version"]
 description = project["description"]
-long_description = open(project["readme"]).read()  # Read the README file content
+long_description = open(project["readme"]).read()
 long_description_content_type = "text/markdown"
-author = project["authors"][0]["name"]
-author_email = project["authors"][0]["email"]
+author = project["authors"][0]["name"] if "authors" in project else "Your Name"
+author_email = project["authors"][0]["email"] if "authors" in project else "you@example.com"
 requires_python = project["requires-python"]
-url = project.get("homepage", "https://github.com/yourusername/neuralcore")  # Use a default URL if missing
+url = project.get("homepage", "https://github.com/yourusername/neuralvoid")
 
-# Extract dependencies from the pyproject.toml
-install_requires = project["dependencies"]
+# Determine environment (dev or prod)
+env = os.environ.get("INSTALL_ENV", "prod")  # default to production
 
-# Scripts section (if defined)
+# Base dependencies
+install_requires = list(project.get("dependencies", []))
+
+# Add optional dependencies based on environment
+optional_deps = project.get("optional-dependencies", {})
+install_requires += optional_deps.get(env, [])
+
+# Scripts
 scripts = project.get("scripts", {})
 
 setup(
@@ -44,5 +52,5 @@ setup(
         "Operating System :: OS Independent",
     ],
     python_requires=requires_python,
-    scripts=scripts,  # Include any scripts defined in pyproject.toml
+    scripts=scripts,
 )
