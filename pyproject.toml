@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    neuralcore = { path = "../NeuralCore", editable = true }
+    "neuralcore @ file:../NeuralCore"
 ]
 
 prod = [
