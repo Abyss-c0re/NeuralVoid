@@ -1,0 +1,26 @@
+[project]
+name = "neuralvoid"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "neuralcore",
+    "textual>=8.1.1",
+]
+
+[tool.pyright]  
+venvPath = "."     
+venv = ".venv"
+
+[tool.uv.sources]
+neuralcore = { path = "../NeuralCore", editable = true }
+
+[project.scripts]
+neuralvoid = "neuralvoid.main:main"
+
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11.0", "toml"]
+build-backend = "uv_build"
+
+
