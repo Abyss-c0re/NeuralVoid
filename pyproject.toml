@@ -14,7 +14,7 @@ venvPath = "."
 venv = ".venv"
 
 [project.scripts]
-neuralcore = "neuralvoid:main"
+neuralvoid = "neuralvoid.main:main"
 
 [build-system]
 requires = ["uv_build>=0.10.10,<0.11.0", "toml>=0.10.2"]
