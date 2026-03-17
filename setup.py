@@ -14,7 +14,9 @@ long_description_content_type = "text/markdown"
 author = project["authors"][0]["name"]
 author_email = project["authors"][0]["email"]
 requires_python = project["requires-python"]
-url = project.get("homepage", "https://github.com/yourusername/neuralcore")  # Use a default URL if missing
+url = project.get(
+    "homepage", "https://github.com/yourusername/neuralcore"
+)  # Use a default URL if missing
 
 # Extract dependencies from the pyproject.toml
 install_requires = project["dependencies"]

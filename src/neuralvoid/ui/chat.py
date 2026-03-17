@@ -12,7 +12,7 @@ from textual.binding import Binding
 from neuralcore.core.client import LLMClient
 from neuralcore.actions.actions import ActionSet
 from neuralcore.actions.manager import DynamicActionManager
-    
+
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
 
 from neuralcore.cognition.memory import ContextManager
@@ -103,6 +103,9 @@ class LLMChatApp(App):
         ] = None,
         context_manager: Optional[ContextManager] = None,
         tool_rendering: Optional[str] = "off",
+        max_iterations: Optional[int] = None,
+        default_temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         super().__init__()
 
@@ -114,6 +117,21 @@ class LLMChatApp(App):
 
         self.rendering = get_renderer()
         self.tool_rendering = tool_rendering  # off | info | full
+        self.max_iterations = (
+            max_iterations
+            if max_iterations is not None
+            else getattr(client, "max_iterations", 100)
+        )
+        self.default_temperature = (
+            default_temperature
+            if default_temperature is not None
+            else getattr(client, "default_temperature", 0.3)
+        )
+        self.max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else getattr(client, "max_tokens", 32000)
+        )
 
     def compose(self) -> ComposeResult:
         self.chat = ChatView(id="chat")
@@ -211,8 +229,8 @@ class LLMChatApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
-        event.input.value = ""               # clear immediately
-        #self.query_one("#input", Input).focus()  # keep focus for next input
+        event.input.value = ""  # clear immediately
+        # self.query_one("#input", Input).focus()  # keep focus for next input
 
         if not value:
             return
@@ -222,7 +240,12 @@ class LLMChatApp(App):
         # ── Special commands ─────────────────────────────────────
         if cmd in ("stop", "cancel"):
             if self.client.stop_stream():
-                self.chat.add(Message("system", "🛑 **Stop signal sent** — current stream will end soon."))
+                self.chat.add(
+                    Message(
+                        "system",
+                        "🛑 **Stop signal sent** — current stream will end soon.",
+                    )
+                )
             else:
                 self.chat.add(Message("system", "ℹ️ No active stream to stop."))
             return  # do NOT treat as user message
@@ -292,154 +315,6 @@ class LLMChatApp(App):
             message.update(message.render_markdown())
             self.chat.scroll_end(animate=False)
 
-    # ----------------------------
-
-    # Stream LLM with tools & printer
-    # ----------------------------
-    # async def stream_llm(
-    #     self,
-    #     prompt: str,
-    #     message: Message,
-    #     tools: Optional[ToolProvider] = None,
-    # ) -> None:
-    #     """
-    #     High-level UI streaming method that consumes events from agent_stream
-    #     and updates the chat UI accordingly — with batched Markdown rendering for speed.
-    #     """
-    #     import time  # For timing batch updates
-
-    #     assistant_msg = message
-    #     text_buffer: str = ""
-    #     last_update: float = time.time() - 0.1  # Force initial update if needed
-    #     UPDATE_INTERVAL: float = 0.1  # Update UI every 0.1 seconds (10x/sec max)
-
-    #     # ── Prepare initial messages (outside of LLMClient) ──
-    #     messages = [
-    #         {"role": "system", "content": self.system_prompt or ""}
-    #     ] + self.conversation[-15:]
-
-    #     # Context enrichment (same logic as before)
-    #     if self.context_manager:
-    #         try:
-    #             context_history = await self.context_manager.generate_prompt(
-    #                 prompt, num_messages=0
-    #             )
-    #             if context_history and context_history[-1].get("content"):
-    #                 last_msg = context_history[-1]["content"]
-    #                 if "\nUser query:" in last_msg:
-    #                     ctx_part = last_msg.split("\nUser query:")[0].strip()
-    #                     if ctx_part:
-    #                         messages.insert(
-    #                             1,
-    #                             {
-    #                                 "role": "system",
-    #                                 "content": f"Relevant context:\n{ctx_part}",
-    #                             },
-    #                         )
-    #         except Exception as e:
-    #             logger.error(f"History enrichment failed: {e}", exc_info=True)
-
-    #     # ── Consume agent stream events and update UI ──
-    #     async for event_type, payload in self.client.agent_stream(
-    #         user_prompt=prompt,
-    #         messages_so_far=messages,
-    #         tools=tools or [],
-    #         context_manager=self.context_manager,
-    #         max_iterations=100,
-    #         max_tokens = 32000,
-    #     ):
-    #         if event_type == "content_delta":
-    #             delta = payload
-    #             text_buffer += delta
-    #             assistant_msg.buffer = text_buffer
-
-    #             # ── Batched Markdown update for performance ──────────────────────
-    #             current_time = time.time()
-    #             if current_time - last_update >= UPDATE_INTERVAL:
-    #                 assistant_msg.update(assistant_msg.render_markdown())
-    #                 last_update = current_time
-    #                 self.chat.scroll_end(animate=False)  # Smoother without animation
-
-    #         elif event_type == "tool_start":
-    #             # Force an update before tool render (if buffered text pending)
-    #             if text_buffer:
-    #                 assistant_msg.update(assistant_msg.render_markdown())
-    #                 self.chat.scroll_end(animate=False)
-    #             self.render_tool_call(
-    #                 assistant_msg,
-    #                 name=payload["name"],
-    #                 args=payload.get("args", {}),
-    #             )
-
-    #         elif event_type == "tool_result":
-    #             self.render_tool_call(
-    #                 assistant_msg,
-    #                 name=payload["name"],
-    #                 args=payload.get("args", {}),
-    #                 result=str(payload.get("result", "")),
-    #                 error=payload.get("error", False),
-    #             )
-
-    #         elif event_type == "needs_confirmation":
-    #             # Force update before showing confirmation
-    #             if text_buffer:
-    #                 assistant_msg.update(assistant_msg.render_markdown())
-    #                 self.chat.scroll_end(animate=False)
-    #             preview = payload.get("preview", "")
-    #             self.render_tool_call(
-    #                 assistant_msg,
-    #                 name=payload["name"],
-    #                 args=payload["args"],
-    #                 confirmation=preview,
-    #             )
-    #             self.waiting_for_confirmation = True
-    #             self.pending_confirmation = {
-    #                 "tool_call_id": payload["tool_call_id"],
-    #                 "name": payload["name"],
-    #                 "args": payload["args"],
-    #                 "action": payload.get("action"),
-    #                 "assistant_msg": assistant_msg,
-    #                 "tool_calls": payload.get("tool_calls"),
-    #             }
-    #             return  # Pause here — waiting for user confirmation
-
-    #         elif event_type == "cancelled":
-    #             text_buffer += f"\n\n🛑 **Stream cancelled** — {payload or 'user requested stop'}"
-    #             assistant_msg.buffer = text_buffer
-    #             assistant_msg.update(assistant_msg.render_markdown())
-    #             self.chat.scroll_end(animate=False)
-    #             return
-
-    #         elif event_type == "final_answer":
-    #             # Final non-tool response
-    #             self.conversation.append({"role": "assistant", "content": payload})
-    #             logger.info(f"Conversation now has {len(self.conversation)} messages")
-
-    #         elif event_type == "assistant_message":
-    #             # Optional hook — usually not needed
-    #             pass
-
-    #         elif event_type == "error":
-    #             text_buffer += f"\n\n❌ **Error:** {payload}"
-    #             assistant_msg.buffer = text_buffer
-    #             assistant_msg.update(assistant_msg.render_markdown())
-    #             self.chat.scroll_end(animate=False)
-    #             return
-
-    #         elif event_type in ("log", "warning"):
-    #             logger.debug(f"Agent: {payload}")
-
-    #         elif event_type == "finish":
-    #             if payload.get("reason") == "max_iterations_reached":
-    #                 text_buffer += "\n\n⚠️ Max iterations reached."
-    #                 assistant_msg.buffer = text_buffer
-    #                 assistant_msg.update(assistant_msg.render_markdown())
-    #                 self.chat.scroll_end(animate=False)
-
-    #     # ── Final update to flush any remaining buffer ────────────────────────
-    #     assistant_msg.update(assistant_msg.render_markdown())
-    #     self.chat.scroll_end(animate=False)
-
     async def stream_llm(
         self,
         prompt: str,
@@ -471,7 +346,10 @@ class LLMChatApp(App):
                         if ctx_part:
                             messages.insert(
                                 1,
-                                {"role": "system", "content": f"Relevant context:\n{ctx_part}"},
+                                {
+                                    "role": "system",
+                                    "content": f"Relevant context:\n{ctx_part}",
+                                },
                             )
             except Exception as e:
                 logger.error(f"History enrichment failed: {e}", exc_info=True)
@@ -479,9 +357,9 @@ class LLMChatApp(App):
         # ── Use AgentRunner instead of client.agent_stream ────────────────────────
         runner = AgentRunner(
             client=self.client,
-            max_iterations=100,
-            default_temperature=0.3,           # ← adjust to match your preference
-            default_max_tokens=32000,
+            max_iterations=self.max_iterations,
+            default_temperature=self.default_temperature,  # ← adjust to match your preference
+            max_tokens=self.max_tokens,
         )
 
         async for event_type, payload in runner.run(
@@ -546,7 +424,9 @@ class LLMChatApp(App):
                 return  # pause for user input
 
             elif event_type == "cancelled":
-                text_buffer += f"\n\n🛑 **Stream cancelled** — {payload or 'user requested stop'}"
+                text_buffer += (
+                    f"\n\n🛑 **Stream cancelled** — {payload or 'user requested stop'}"
+                )
                 assistant_msg.buffer = text_buffer
                 assistant_msg.update(assistant_msg.render_markdown())
                 self.chat.scroll_end(animate=False)

@@ -55,7 +55,9 @@ class HeadlessAgentRunner:
         data: dict[str, Any] = {
             "pid": os.getpid(),
             "status": status,
-            "started_at": self._start_time.isoformat() + "Z" if self._start_time else None,
+            "started_at": self._start_time.isoformat() + "Z"
+            if self._start_time
+            else None,
             "last_update": now.isoformat() + "Z",
             "prompt": prompt,
             "current_iteration": iteration,
@@ -88,7 +90,9 @@ class HeadlessAgentRunner:
 
     def _setup_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
         def shutdown_handler(sig: Optional[int] = None):
-            print(f"\n[{signal.Signals(sig).name if sig else 'Shutdown'}] Stopping agent...")
+            print(
+                f"\n[{signal.Signals(sig).name if sig else 'Shutdown'}] Stopping agent..."
+            )
             self._write_status("shutting_down", message="Received shutdown signal")
             for task in asyncio.all_tasks(loop):
                 if task is not asyncio.current_task():
@@ -122,9 +126,11 @@ class HeadlessAgentRunner:
             try:
                 old_pid = int(self.pid_path.read_text().strip())
                 os.kill(old_pid, 0)  # raises if not alive
-                print(f"PID file exists and process {old_pid} is alive → refusing to start")
+                print(
+                    f"PID file exists and process {old_pid} is alive → refusing to start"
+                )
                 return False
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 print("Removing stale PID file")
                 self.pid_path.unlink(missing_ok=True)
 
@@ -134,7 +140,7 @@ class HeadlessAgentRunner:
         runner = AgentRunner(
             client,
             max_iterations=max_iterations,
-            default_max_tokens=max_tokens,
+            max_tokens=max_tokens,
         )
 
         current_iteration = 0
@@ -177,7 +183,9 @@ class HeadlessAgentRunner:
                         )
                     else:
                         res_str = str(res)
-                        print(f"\n✅ {res_str[:300]}{'...' if len(res_str) > 300 else ''}")
+                        print(
+                            f"\n✅ {res_str[:300]}{'...' if len(res_str) > 300 else ''}"
+                        )
                         self._write_status(
                             "running",
                             prompt=prompt,
@@ -223,7 +231,9 @@ class HeadlessAgentRunner:
             if self._success:
                 self._write_status("success", force=True)
             else:
-                current = self.status_path.read_text() if self.status_path.exists() else "{}"
+                current = (
+                    self.status_path.read_text() if self.status_path.exists() else "{}"
+                )
                 data = json.loads(current)
                 if data.get("status") not in ("success", "cancelled", "error"):
                     self._write_status("failed", force=True)

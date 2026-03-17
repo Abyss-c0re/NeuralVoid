@@ -1,16 +1,11 @@
-import os
 import sys
-
 import asyncio
-
 from pathlib import Path
-from neuralcore.core.client import LLMClient
+
 from neuralcore.actions.registry import ActionRegistry
-
 from neuralcore.actions.manager import DynamicActionManager
-from neuralcore.utils.tool_browser import ToolBrowser
 
-from neuralcore.utils.llm_tools import InternalTools
+from neuralcore.utils.tool_browser import ToolBrowser
 from neuralcore.cognition.memory import ContextManager
 
 from neuralvoid.tools.terminal_set import get_terminal_actions
@@ -41,12 +36,12 @@ def main():
     clients = factory.build()
 
     client = clients.get("main")
-    reasoner = clients.get("reasoning")
     embeddings = clients.get("embeddings")
 
     # Ensure tokenizer
     if not client.tokenizer:
         from neuralcore.utils.text_tokenizer import TextTokenizer
+
         main_cfg = loader.get_client_config("main")
         tokenizer_name = main_cfg.get("tokenizer", "Qwen/Qwen3.5-9B")
         tokenizer = TextTokenizer(tokenizer_name)
@@ -70,8 +65,7 @@ def main():
     ToolBrowser(registry, dynamic_manager)
 
     context_manager = ContextManager(client=embeddings, tokenizer=tokenizer)
-
-    # ───────────────────────────── DEPLOY MODE ──────────────────────
+    # Headless Agent Mode
     if args.deploy:
         from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
@@ -82,11 +76,16 @@ def main():
         )
 
         prompt = args.deploy.strip()
-        print(f"🚀 Deploying headless agent")
+        agent_cfg = loader.get_agent_config("headless")  # <-- NEW
+
+        max_iterations = args.max_iterations or agent_cfg.get("max_iterations", 10)
+        max_tokens = agent_cfg.get("max_tokens", 12000)
+
+        print("    Deploying headless agent")
         print(f"   Prompt       : {prompt}")
         print(f"   Status file  : {Path(args.status_file).resolve()}")
         print(f"   PID file     : {Path(args.pid_file).resolve()}")
-        print(f"   Throttle     : {args.throttle_sec} s")
+        print(f"   Max iterations: {max_iterations}")
         print("-" * 60)
 
         success = asyncio.run(
@@ -96,20 +95,26 @@ def main():
                 dynamic_manager=dynamic_manager,
                 system_prompt=system_prompt,
                 context_manager=context_manager,
-                max_iterations=args.max_iterations,
-                max_tokens=12000,
+                max_iterations=max_iterations,
+                max_tokens=max_tokens,
             )
         )
 
         sys.exit(0 if success else 1)
 
     # ───────────────────────────── INTERACTIVE CHAT ────────────────
+
+    app_cfg = loader.get_app_config()
+    max_iterations = getattr(args, "max_iterations", None) or app_cfg.get("max_iterations", 10)
+    max_tokens = app_cfg.get("max_tokens", 12000)
     app = LLMChatApp(
         client=client,
         system_prompt=system_prompt,
         tools=dynamic_manager,
         context_manager=context_manager,
         tool_rendering="info",
+        max_iterations=max_iterations,
+        max_tokens = max_tokens
     )
     app.run()
 
