@@ -324,7 +324,8 @@ class LLMChatApp(App):
             messages_so_far=messages,
             tools=tools or [],
             context_manager=self.context_manager,
-            max_iterations=35
+            max_iterations=100,
+            max_tokens = 32000,
         ):
             if event_type == "content_delta":
                 delta = payload

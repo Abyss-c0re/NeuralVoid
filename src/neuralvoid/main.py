@@ -2,19 +2,18 @@ import os
 
 from neuralcore.core.client import LLMClient
 from neuralcore.actions.registry import ActionRegistry
-from neuralcore.actions.manager import DynamicActionManager
 
-from neuralcore.utils.llm_tools import InternalTools
+from neuralcore.actions.manager import DynamicActionManager
 from neuralcore.utils.tool_browser import ToolBrowser
 
+from neuralcore.utils.llm_tools import InternalTools
 from neuralcore.cognition.memory import ContextManager
 
 from neuralvoid.tools.terminal_set import get_terminal_actions
 from neuralvoid.tools.file_set import get_file_actions
+
 from neuralvoid.ui.chat import LLMChatApp
-
 from neuralvoid.ui.rendering import get_renderer
-
 from neuralcore.utils.logger import Logger
 
 
@@ -36,12 +35,18 @@ def main():
         },
     )
 
+    if not client.tokenizer:
+        from neuralcore.utils.text_tokenizer import TextTokenizer
+        tokenizer = TextTokenizer("Qwen/Qwen3.5-9B")
+    else:
+        tokenizer = client.tokenizer
+
   
 
     reasoner = LLMClient(
         base_url=base_url,
         model=model,
-        tokenizer = client.tokenizer,
+        tokenizer = tokenizer,
         extra_body={
             "presence_penalty": 1.2,
             "top_k": 30,
@@ -52,7 +57,7 @@ def main():
     embeddings = LLMClient(
         base_url=base_url,
         model="embedding-gemma-300m",
-        tokenizer = client.tokenizer
+        tokenizer = tokenizer
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -82,8 +87,8 @@ def main():
     ToolBrowser(registry, dynamic_manager)  # auto-adds itself
 
    
-
-    context_manager = ContextManager(client=embeddings,tokenizer = client.tokenizer)
+    
+    context_manager = ContextManager(client=embeddings,tokenizer = tokenizer)
 
     app = LLMChatApp(
         client=client,
