@@ -11,8 +11,7 @@ ls_action = Action(
     name="ls",
     description="List files in a directory",
     tags=[
-        "filesystem","file","directory","list","browse","navigation",
-        "shell","terminal","system","developer","inspect","structure"
+        "filesystem","files","directory","list","browse","navigation","system","developer","inspect"
     ],
     parameters={
         "path": {"type": "string", "description": "Directory path, default '.'"}
@@ -25,8 +24,7 @@ pwd_action = Action(
     name="pwd",
     description="Print working directory",
     tags=[
-        "filesystem","directory","path","location","current","navigation",
-        "shell","terminal","system","developer"
+        "filesystem","directory","path","location","current","navigation"
     ],
     parameters={},
     executor=exec_pwd,
@@ -37,8 +35,7 @@ cd_action = Action(
     name="cd",
     description="Change current working directory",
     tags=[
-        "filesystem","directory","navigation","path","change","cwd",
-        "shell","terminal","system","developer"
+        "filesystem","directory","navigation","path","change",
     ],
     parameters={"path": {"type": "string", "description": "Directory to change to"}},
     executor=exec_cd,
@@ -50,7 +47,7 @@ cp_action = Action(
     description="Copy a file or directory",
     tags=[
         "filesystem","file","directory","copy","duplicate",
-        "backup","replicate","developer","shell","terminal"
+        "backup","replicate"
     ],
     parameters={
         "source": {"type": "string"},
@@ -65,7 +62,7 @@ mv_action = Action(
     description="Move or rename a file/directory",
     tags=[
         "filesystem","file","directory","move","rename","transfer",
-        "organize","developer","shell","terminal"
+        "organize"
     ],
     parameters={
         "source": {"type": "string"},
@@ -80,7 +77,7 @@ mkdir_action = Action(
     description="Create a new directory",
     tags=[
         "filesystem","directory","create","folder",
-        "structure","project","developer","shell","terminal"
+        "structure","project"
     ],
     parameters={"path": {"type": "string"}},
     executor=exec_mkdir,
@@ -92,7 +89,7 @@ cat_action = Action(
     description="Display file contents",
     tags=[
         "filesystem","file","read","view","display","content",
-        "text","code","inspect","developer","shell","terminal"
+        "text","code","inspect"
     ],
     parameters={"file_path": {"type": "string", "description": "Path to the file"}},
     executor=exec_cat,
@@ -104,7 +101,7 @@ delete_file_action = Action(
     description="Delete a file (requires human confirmation)",
     tags=[
         "filesystem","file","delete","remove","dangerous",
-        "cleanup","developer","shell","terminal"
+        "cleanup"
     ],
     parameters={"file_path": {"type": "string"}},
     executor=exec_delete_file,
@@ -117,7 +114,7 @@ delete_dir_action = Action(
     description="Delete directory recursively",
     tags=[
         "filesystem","directory","delete","remove","recursive",
-        "dangerous","cleanup","developer","shell","terminal"
+        "dangerous","cleanup"
     ],
     parameters={"dir_path": {"type": "string"}},
     executor=exec_delete_dir,
@@ -130,7 +127,7 @@ find_action = Action(
     description="Find files in directory optionally by name",
     tags=[
         "filesystem","file","directory","search","lookup","locate",
-        "pattern","discover","developer","shell","terminal"
+        "pattern","discover"
     ],
     parameters={
         "path": {"type": "string"},
@@ -139,7 +136,6 @@ find_action = Action(
     executor=exec_find,
     required=[],
 )
-
 
 
 touch_action = Action(
@@ -159,7 +155,7 @@ head_action = Action(
     description="Show first lines of a file",
     tags=[
         "filesystem","file","read","preview","text","lines",
-        "log","inspect","developer","shell","terminal"
+        "log","inspect"
     ],
     parameters={
         "file_path": {"type": "string", "description": "Path to the file"},
@@ -174,7 +170,7 @@ tail_action = Action(
     description="Show last lines of a file",
     tags=[
         "filesystem","file","read","logs","text","monitor",
-        "stream","inspect","developer","shell","terminal"
+        "stream","inspect"
     ],
     parameters={
         "file_path": {"type": "string", "description": "Path to the file"},
@@ -207,7 +203,7 @@ grep_action = Action(
     description="Search for pattern in file or directory",
     tags=[
         "filesystem","file","search","pattern","text","regex",
-        "code","log","analysis","developer","shell","terminal"
+        "code","log","analysis"
     ],
     parameters={
         "pattern": {"type": "string"},
@@ -224,7 +220,7 @@ tree_action = Action(
     name="tree",
     description="Display directory tree structure",
     tags=[
-        "filesystem","directory","structure","hierarchy",
+        "filesystem","directory","structure","hierarchy","inspect",
         "visualize","navigation","project","developer","shell"
     ],
     parameters={
@@ -280,7 +276,7 @@ which_action = Action(
     description="Locate command in PATH",
     tags=[
         "system","command","binary","executable","path",
-        "lookup","environment","developer","shell","terminal"
+        "lookup","environment"
     ],
     parameters={"command": {"type": "string"}},
     executor=exec_which,
@@ -302,7 +298,6 @@ awk_action = Action(
     executor=exec_awk,
     required=["file_path","script"],
 )
-
 
 
 # ─────────────────────────────────────────────────────────────
