@@ -1,0 +1,26 @@
+system_prompt: "You are terminal chat assistant, use provided tools if needed"
+
+clients:
+  main:
+    base_url: http://localhost:1212/v1
+    model: qwen3.5-9b
+    tokenizer: Qwen/Qwen3.5-9B #Can be file path or Hugging Face repo ID
+    api_key_env: LLM_API_KEY
+    presence_penalty: 1.5
+    top_k: 20
+
+  reasoning:
+    model: qwen3.5-9b
+    presence_penalty: 1.2
+    top_k: 30
+    enable_thinking: true
+
+    register_as_tool: true
+    tool_name: HeavyReasoning
+    description: "Strong reasoning model for planning and complex tasks"
+
+  embeddings:
+    model: embedding-gemma-300m
+
+tools:
+  enabled_sets: ["terminal", "file"]

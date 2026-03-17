@@ -22,77 +22,56 @@ from neuralvoid.ui.rendering import get_renderer
 from neuralvoid.cli.arg_parser import CLIParser
 from neuralcore.utils.logger import Logger
 
+from neuralcore.utils.config import ConfigLoader
+from neuralcore.core.client_factory import ClientFactory
 
 logger = Logger.get_logger(renderer=get_renderer())
 
+
 def main():
+    # ───────────────────────────── CLI ─────────────────────────────
     args = CLIParser().parse()
 
-    # ─────────────────────────────────────────────────────────────
-    # LLM & components setup (common to both modes)
-    # ─────────────────────────────────────────────────────────────
-    base_url = os.getenv("LLM_BASE_URL", "http://localhost:1212/v1")
-    model = os.getenv("LLM_MODEL", "qwen3.5-9b")
-    system_prompt = "You are terminal chat assistant, use provided tools if needed"
+    # ───────────────────────────── CONFIG ──────────────────────────
+    loader = ConfigLoader(cli_path=args.config)
+    system_prompt = loader.get_system_prompt()
 
-    client = LLMClient(
-        base_url=base_url,
-        model=model,
-        tokenizer="Qwen/Qwen3.5-9B",
-        api_key= "not-needed",
-        extra_body={
-            "presence_penalty": 1.5,
-            "top_k": 20,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-    )
+    # ───────────────────────────── CLIENTS ─────────────────────────
+    factory = ClientFactory(loader)
+    clients = factory.build()
 
+    client = clients.get("main")
+    reasoner = clients.get("reasoning")
+    embeddings = clients.get("embeddings")
+
+    # Ensure tokenizer
     if not client.tokenizer:
         from neuralcore.utils.text_tokenizer import TextTokenizer
-        tokenizer = TextTokenizer("Qwen/Qwen3.5-9B")
+        main_cfg = loader.get_client_config("main")
+        tokenizer_name = main_cfg.get("tokenizer", "Qwen/Qwen3.5-9B")
+        tokenizer = TextTokenizer(tokenizer_name)
     else:
         tokenizer = client.tokenizer
 
-    reasoner = LLMClient(
-        base_url=base_url,
-        model=model,
-        tokenizer=tokenizer,
-        extra_body={
-            "presence_penalty": 1.2,
-            "top_k": 30,
-            "chat_template_kwargs": {"enable_thinking": True},
-        },
-    )
-
-    embeddings = LLMClient(
-        base_url=base_url,
-        model="embedding-gemma-300m",
-        tokenizer=tokenizer,
-    )
-
-    # Registry & tools setup
+    # ───────────────────────────── REGISTRY & TOOLS ─────────────────
     registry = ActionRegistry()
-    registry.register_set("terminal set", get_terminal_actions())
-    registry.register_set("file set", get_file_actions())
 
-    reasoning_tools = InternalTools(
-        client=reasoner,
-        description=(
-            "Powerful reasoning model optimized for step-by-step thinking, "
-            "complex math, planning, code writing, and long chains of thought."
-        ),
-        methods=[client.ask, client.stream_chat, client.chat],
-    )
-    registry.register_set("HeavyReasoning", reasoning_tools.as_action_set("HeavyReasoning"))
+    # register standard tool sets
+    enabled_sets = loader.config.get("tools", {}).get("enabled_sets", [])
+    if "terminal" in enabled_sets:
+        registry.register_set("terminal set", get_terminal_actions())
+    if "file" in enabled_sets:
+        registry.register_set("file set", get_file_actions())
+
+    # register LLM clients marked as tools in config
+    factory.register_tool_clients(registry, client)
 
     dynamic_manager = DynamicActionManager(registry)
     ToolBrowser(registry, dynamic_manager)
 
     context_manager = ContextManager(client=embeddings, tokenizer=tokenizer)
 
-    # ─────────────────────────────────────────────────────────────
-    # DEPLOY AGENT MODE
-    # ─────────────────────────────────────────────────────────────
+    # ───────────────────────────── DEPLOY MODE ──────────────────────
     if args.deploy:
         from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
@@ -124,9 +103,7 @@ def main():
 
         sys.exit(0 if success else 1)
 
-    # ─────────────────────────────────────────────────────────────
-    # NORMAL INTERACTIVE CHAT MODE
-    # ─────────────────────────────────────────────────────────────
+    # ───────────────────────────── INTERACTIVE CHAT ────────────────
     app = LLMChatApp(
         client=client,
         system_prompt=system_prompt,
