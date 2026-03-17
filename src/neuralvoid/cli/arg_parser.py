@@ -41,6 +41,12 @@ class CLIParser:
                  'Example: --deploy "Summarize the project and create a TODO list"'
         )
 
+        self.parser.add_argument(
+            "--config",
+            type=str,
+            help="Path to config file"
+        )
+
         # Deploy-only group
         deploy_group = self.parser.add_argument_group(
             "headless agent options (only with --deploy)"
