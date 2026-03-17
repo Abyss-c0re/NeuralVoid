@@ -127,10 +127,14 @@ class LLMChatApp(App):
             Message(
                 "assistant",
                 f"Connected to **{self.client.model}**\n\n"
-                "Type a message and press **Enter**.",
+                "Type a message and press **Enter**.\n"
+                "Commands: **stop** / **cancel** → stop current stream\n"
+                "**exit** → close app",
             )
         )
-        # asyncio.create_task(_test_printer())
+
+        # ← NEW: Auto-focus input on startup
+        self.query_one(Input).focus()
 
     async def _handle_confirmation_response(self, user_input: str) -> bool:
         """
@@ -206,17 +210,33 @@ class LLMChatApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
-        event.input.value = ""
+        event.input.value = ""               # clear immediately
+        #self.query_one("#input", Input).focus()  # keep focus for next input
 
         if not value:
             return
 
-        # Check if this is answering a confirmation prompt
-        if await self._handle_confirmation_response(value):
-            # It was a confirmation → do not treat as new user query
+        cmd = value.lower()
+
+        # ── Special commands ─────────────────────────────────────
+        if cmd in ("stop", "cancel"):
+            if self.client.stop_stream():
+                self.chat.add(Message("system", "🛑 **Stop signal sent** — current stream will end soon."))
+            else:
+                self.chat.add(Message("system", "ℹ️ No active stream to stop."))
+            return  # do NOT treat as user message
+
+        elif cmd == "exit":
+            self.chat.add(Message("system", "👋 Exiting..."))
+            await asyncio.sleep(0.3)  # let the message appear
+            self.exit()
             return
 
-        # Normal user message flow
+        # ── Confirmation handling (unchanged) ────────────────────
+        if await self._handle_confirmation_response(value):
+            return
+
+        # ── Normal user message flow (unchanged) ─────────────────
         self.chat.add(Message("user", value))
         self.conversation.append({"role": "user", "content": value})
 
@@ -381,6 +401,13 @@ class LLMChatApp(App):
                     "tool_calls": payload.get("tool_calls"),
                 }
                 return  # Pause here — waiting for user confirmation
+
+            elif event_type == "cancelled":
+                text_buffer += f"\n\n🛑 **Stream cancelled** — {payload or 'user requested stop'}"
+                assistant_msg.buffer = text_buffer
+                assistant_msg.update(assistant_msg.render_markdown())
+                self.chat.scroll_end(animate=False)
+                return
 
             elif event_type == "final_answer":
                 # Final non-tool response
