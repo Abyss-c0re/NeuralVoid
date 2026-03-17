@@ -1,9 +1,9 @@
 import os
 import sys
 
-import argparse
 import asyncio
 
+from pathlib import Path
 from neuralcore.core.client import LLMClient
 from neuralcore.actions.registry import ActionRegistry
 
@@ -19,22 +19,18 @@ from neuralvoid.tools.file_set import get_file_actions
 from neuralvoid.ui.chat import LLMChatApp
 from neuralvoid.ui.rendering import get_renderer
 
+from neuralvoid.cli.arg_parser import CLIParser
 from neuralcore.utils.logger import Logger
 
 
 logger = Logger.get_logger(renderer=get_renderer())
 
 def main():
-    parser = argparse.ArgumentParser(description="Neuralvoid Terminal Assistant / Agent Deployer")
-    parser.add_argument(
-        "--deploy",
-        type=str,
-        metavar="PROMPT",
-        help='Deploy agent with prompt, e.g. --deploy "Summarize the project and create a TODO list"',
-        default=None,
-)
-    args = parser.parse_args()
+    args = CLIParser().parse()
 
+    # ─────────────────────────────────────────────────────────────
+    # LLM & components setup (common to both modes)
+    # ─────────────────────────────────────────────────────────────
     base_url = os.getenv("LLM_BASE_URL", "http://localhost:1212/v1")
     model = os.getenv("LLM_MODEL", "qwen3.5-9b")
     system_prompt = "You are terminal chat assistant, use provided tools if needed"
@@ -43,6 +39,7 @@ def main():
         base_url=base_url,
         model=model,
         tokenizer="Qwen/Qwen3.5-9B",
+        api_key= "not-needed",
         extra_body={
             "presence_penalty": 1.5,
             "top_k": 20,
@@ -73,9 +70,7 @@ def main():
         tokenizer=tokenizer,
     )
 
-    # ─────────────────────────────────────────────────────────────
-    # Registry
-    # ─────────────────────────────────────────────────────────────
+    # Registry & tools setup
     registry = ActionRegistry()
     registry.register_set("terminal set", get_terminal_actions())
     registry.register_set("file set", get_file_actions())
@@ -86,14 +81,9 @@ def main():
             "Powerful reasoning model optimized for step-by-step thinking, "
             "complex math, planning, code writing, and long chains of thought."
         ),
-        methods=[
-            client.ask,
-            client.stream_chat,
-            client.chat,
-        ],
+        methods=[client.ask, client.stream_chat, client.chat],
     )
-    reasoning_set = reasoning_tools.as_action_set("HeavyReasoning")
-    registry.register_set("HeavyReasoning", reasoning_set)
+    registry.register_set("HeavyReasoning", reasoning_tools.as_action_set("HeavyReasoning"))
 
     dynamic_manager = DynamicActionManager(registry)
     ToolBrowser(registry, dynamic_manager)
@@ -102,20 +92,32 @@ def main():
 
     # ─────────────────────────────────────────────────────────────
     # DEPLOY AGENT MODE
+    # ─────────────────────────────────────────────────────────────
     if args.deploy:
-        from neuralvoid.core.headless_agent import run_agent_loop
+        from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
-        prompt = args.deploy
-        print(f"🚀 Deploying agent with prompt: {prompt}\n")
+        runner = HeadlessAgentRunner(
+            status_file=args.status_file,
+            pid_file=args.pid_file,
+            status_update_throttle_sec=args.throttle_sec,
+        )
+
+        prompt = args.deploy.strip()
+        print(f"🚀 Deploying headless agent")
+        print(f"   Prompt       : {prompt}")
+        print(f"   Status file  : {Path(args.status_file).resolve()}")
+        print(f"   PID file     : {Path(args.pid_file).resolve()}")
+        print(f"   Throttle     : {args.throttle_sec} s")
+        print("-" * 60)
 
         success = asyncio.run(
-            run_agent_loop(
-                client,
-                prompt,
-                dynamic_manager,
-                system_prompt,
-                context_manager,
-                max_iterations=25,
+            runner.run(
+                client=client,
+                prompt=prompt,
+                dynamic_manager=dynamic_manager,
+                system_prompt=system_prompt,
+                context_manager=context_manager,
+                max_iterations=args.max_iterations,
                 max_tokens=12000,
             )
         )
@@ -123,7 +125,7 @@ def main():
         sys.exit(0 if success else 1)
 
     # ─────────────────────────────────────────────────────────────
-    # NORMAL UI MODE
+    # NORMAL INTERACTIVE CHAT MODE
     # ─────────────────────────────────────────────────────────────
     app = LLMChatApp(
         client=client,
