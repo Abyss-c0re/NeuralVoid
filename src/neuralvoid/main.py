@@ -1,4 +1,8 @@
 import os
+import sys
+
+import argparse
+import asyncio
 
 from neuralcore.core.client import LLMClient
 from neuralcore.actions.registry import ActionRegistry
@@ -14,12 +18,23 @@ from neuralvoid.tools.file_set import get_file_actions
 
 from neuralvoid.ui.chat import LLMChatApp
 from neuralvoid.ui.rendering import get_renderer
+
 from neuralcore.utils.logger import Logger
 
 
 logger = Logger.get_logger(renderer=get_renderer())
 
 def main():
+    parser = argparse.ArgumentParser(description="Neuralvoid Terminal Assistant / Agent Deployer")
+    parser.add_argument(
+        "--deploy",
+        type=str,
+        metavar="PROMPT",
+        help='Deploy agent with prompt, e.g. --deploy "Summarize the project and create a TODO list"',
+        default=None,
+)
+    args = parser.parse_args()
+
     base_url = os.getenv("LLM_BASE_URL", "http://localhost:1212/v1")
     model = os.getenv("LLM_MODEL", "qwen3.5-9b")
     system_prompt = "You are terminal chat assistant, use provided tools if needed"
@@ -27,7 +42,7 @@ def main():
     client = LLMClient(
         base_url=base_url,
         model=model,
-        tokenizer= "Qwen/Qwen3.5-9B",
+        tokenizer="Qwen/Qwen3.5-9B",
         extra_body={
             "presence_penalty": 1.5,
             "top_k": 20,
@@ -41,12 +56,10 @@ def main():
     else:
         tokenizer = client.tokenizer
 
-  
-
     reasoner = LLMClient(
         base_url=base_url,
         model=model,
-        tokenizer = tokenizer,
+        tokenizer=tokenizer,
         extra_body={
             "presence_penalty": 1.2,
             "top_k": 30,
@@ -57,43 +70,65 @@ def main():
     embeddings = LLMClient(
         base_url=base_url,
         model="embedding-gemma-300m",
-        tokenizer = tokenizer
+        tokenizer=tokenizer,
     )
 
     # ─────────────────────────────────────────────────────────────
-    # Registry — add as many sets as you want here
+    # Registry
     # ─────────────────────────────────────────────────────────────
     registry = ActionRegistry()
     registry.register_set("terminal set", get_terminal_actions())
     registry.register_set("file set", get_file_actions())
-    # Add more sets here later...
+
     reasoning_tools = InternalTools(
         client=reasoner,
         description=(
             "Powerful reasoning model optimized for step-by-step thinking, "
-            "complex math, planning, code writing, and long chains of thought. "
-            "Use when the main model is struggling with depth or precision."
+            "complex math, planning, code writing, and long chains of thought."
         ),
         methods=[
-            client.ask,  # quick single-turn
-            client.stream_chat,  # streaming long reasoning traces
-            client.chat,  # non-streaming full response
+            client.ask,
+            client.stream_chat,
+            client.chat,
         ],
     )
     reasoning_set = reasoning_tools.as_action_set("HeavyReasoning")
     registry.register_set("HeavyReasoning", reasoning_set)
 
     dynamic_manager = DynamicActionManager(registry)
-    ToolBrowser(registry, dynamic_manager)  # auto-adds itself
+    ToolBrowser(registry, dynamic_manager)
 
-   
-    
-    context_manager = ContextManager(client=embeddings,tokenizer = tokenizer)
+    context_manager = ContextManager(client=embeddings, tokenizer=tokenizer)
 
+    # ─────────────────────────────────────────────────────────────
+    # DEPLOY AGENT MODE
+    if args.deploy:
+        from neuralvoid.core.headless_agent import run_agent_loop
+
+        prompt = args.deploy
+        print(f"🚀 Deploying agent with prompt: {prompt}\n")
+
+        success = asyncio.run(
+            run_agent_loop(
+                client,
+                prompt,
+                dynamic_manager,
+                system_prompt,
+                context_manager,
+                max_iterations=25,
+                max_tokens=12000,
+            )
+        )
+
+        sys.exit(0 if success else 1)
+
+    # ─────────────────────────────────────────────────────────────
+    # NORMAL UI MODE
+    # ─────────────────────────────────────────────────────────────
     app = LLMChatApp(
         client=client,
         system_prompt=system_prompt,
-        tools=dynamic_manager,  # ← works now
+        tools=dynamic_manager,
         context_manager=context_manager,
         tool_rendering="info",
     )
