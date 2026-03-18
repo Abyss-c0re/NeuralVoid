@@ -137,8 +137,9 @@ class HeadlessAgentRunner:
 
         runner = AgentRunner(
             client=client,
-            max_iterations=max_iterations,      # supports -1 = indefinite
-            temperature=0.3,                    # you can expose this if you want
+            max_iterations=max_iterations,
+            max_reflections=3,  # Support new stuck detection
+            temperature=0.3,
             max_tokens=max_tokens,
         )
 
@@ -147,7 +148,6 @@ class HeadlessAgentRunner:
         try:
             async for event_type, payload in runner.run(
                 user_prompt=prompt,
-                messages_so_far=[],                     # ignored by new runner
                 tools=dynamic_manager,
                 system_prompt=system_prompt,
                 context_manager=context_manager,
@@ -190,6 +190,23 @@ class HeadlessAgentRunner:
                 elif event_type == "tool_calls":
                     print(f"\nCalling {len(payload)} tool(s)...")
 
+                elif event_type == "tool_complete":
+                    idx = payload.get("index", -1)
+                    name = payload.get("function", {}).get("name", "unknown")
+                    print(f"\n✅ TOOL COMPLETE: {name} (index={idx})")
+
+                elif event_type == "tool_delta":
+                    # Partial tool update – show progress
+                    tool_info = payload
+                    tool_name = tool_info.get("function", {}).get("name", "unknown")
+                    args_str = tool_info.get("function", {}).get("arguments", "")[:50]
+                    print(f"\n🔧 {tool_name} (args: {args_str}...)")
+
+                elif event_type == "tool_complete":
+                    idx = payload.get("index", -1)
+                    name = payload.get("function", {}).get("name", "unknown")
+                    print(f"\n✅ TOOL COMPLETE: {name} (index={idx})")
+
                 elif event_type == "reflection_triggered":
                     print("\n" + "=" * 60)
                     print("🤔 AGENT REFLECTION")
@@ -219,6 +236,20 @@ class HeadlessAgentRunner:
                         force=True,
                     )
 
+                elif event_type == "final_summary":
+                    # Final markdown report
+                    print("\n" + "=" * 60)
+                    print("📊 EXECUTION REPORT")
+                    print("=" * 60)
+                    print(payload.strip())
+                    print("=" * 60)
+
+                elif event_type == "review_phase":
+                    # Review phase summary
+                    print("\n---\n🔍 REVIEW PHASE\n---\n")
+                    print(str(payload).strip())
+                    print("---\n")
+
                 elif event_type in ("error", "warning", "cancelled"):
                     print(f"\n[{event_type.upper()}] {payload}")
                     if event_type == "error":
@@ -227,8 +258,22 @@ class HeadlessAgentRunner:
                 elif event_type == "needs_confirmation":
                     print("\n⚠️ Needs confirmation — skipping in headless mode")
 
-                elif event_type == "finish" and payload.get("reason") == "max_iterations_reached":
-                    print("\n⚠️ Max iterations reached — forced reflection used as final answer")
+                elif event_type == "finish":
+                    reason = payload.get("reason", "unknown")
+                    print(f"\n🏁 Loop finished: {reason}")
+                    if reason == "max_iterations_reached":
+                        print("⚠️ Max iterations reached — generating final summary")
+                    elif reason == "reflection_stuck":
+                        print("⚠️ Agent stuck after reflections — forcing exit")
+
+                elif event_type == "llm_finish":
+                    print("\n✅ LLM finished generating response")
+
+                elif event_type == "system":
+                    print(f"\n🖥️  SYSTEM: {payload}")
+
+                elif event_type == "cancelled":
+                    print(f"\n🛑 CANCELLED: {payload}")
 
         except asyncio.CancelledError:
             print("\nAgent loop cancelled")
@@ -252,8 +297,8 @@ class HeadlessAgentRunner:
 
             self._cleanup_files()
 
-        print("\n" + "=" * 80)
-        print(f"STATUS: {'SUCCESS' if self._success else 'FAILED'}")
-        print("=" * 80)
+            print("\n" + "=" * 80)
+            print(f"STATUS: {'SUCCESS' if self._success else 'FAILED'}")
+            print("=" * 80)
 
-        return self._success
+            return self._success
