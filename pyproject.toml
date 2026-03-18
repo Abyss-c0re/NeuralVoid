@@ -5,13 +5,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "neuralcore @ git+https://github.com/Abyss-c0re/NeuralCore.git",
-    "textual>=0.81.1",
+    "ipykernel>=7.2.0",
+    "neuralcore",
+    "notebook>=7.5.5",
+    "textual>=8.1.1",
 ]
 
 [tool.pyright]  
 venvPath = "."     
 venv = ".venv"
+
+[tool.uv.sources]
+neuralcore = { path = "../NeuralCore", editable = true }
 
 [project.scripts]
 neuralvoid = "neuralvoid.main:main"
