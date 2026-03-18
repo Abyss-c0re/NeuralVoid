@@ -8,13 +8,16 @@ clients:
     api_key_env: LLM_API_KEY
     presence_penalty: 1.5
     top_k: 20
+    temperature: 0.85
+    max_tokens: 22000
 
   reasoning:
     model: qwen3.5-9b
-    
     presence_penalty: 1.2
     top_k: 30
     enable_thinking: true
+    temperature: 0.4
+    max_tokens: 28000
 
     register_as_tool: true
     tool_name: HeavyReasoning
@@ -22,7 +25,6 @@ clients:
 
   embeddings:
     model: embedding-gemma-300m
-    tokenizer: Qwen/Qwen3.5-9B
 
 tools:
   enabled_sets: ["terminal", "file"]

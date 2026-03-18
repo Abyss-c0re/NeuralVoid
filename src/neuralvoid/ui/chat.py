@@ -121,12 +121,12 @@ class LLMChatApp(App):
         self.max_iterations = (
             max_iterations
             if max_iterations is not None
-            else getattr(client, "max_iterations", 100)
+            else getattr(client, "max_iterations", 20)
         )
         self.temperature = (
             temperature
             if temperature is not None
-            else getattr(client, "temperature", 0.3)
+            else getattr(client, "temperature", 0.7)
         )
         self.max_tokens = (
             max_tokens
