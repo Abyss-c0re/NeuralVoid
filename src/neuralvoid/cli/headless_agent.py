@@ -121,16 +121,14 @@ class HeadlessAgentRunner:
         loop = asyncio.get_running_loop()
         self._setup_signal_handlers(loop)
 
-        # Prepare files
+        # PID / status file logic (unchanged)
         if self.pid_path.exists():
             try:
                 old_pid = int(self.pid_path.read_text().strip())
-                os.kill(old_pid, 0)  # raises if not alive
-                print(
-                    f"PID file exists and process {old_pid} is alive → refusing to start"
-                )
+                os.kill(old_pid, 0)
+                print(f"PID file exists and process {old_pid} is alive → refusing to start")
                 return False
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 print("Removing stale PID file")
                 self.pid_path.unlink(missing_ok=True)
 
@@ -138,8 +136,9 @@ class HeadlessAgentRunner:
         self._write_status("starting", prompt=prompt, force=True)
 
         runner = AgentRunner(
-            client,
-            max_iterations=max_iterations,
+            client=client,
+            max_iterations=max_iterations,      # supports -1 = indefinite
+            temperature=0.3,                    # you can expose this if you want
             max_tokens=max_tokens,
         )
 
@@ -148,7 +147,7 @@ class HeadlessAgentRunner:
         try:
             async for event_type, payload in runner.run(
                 user_prompt=prompt,
-                messages_so_far=[],
+                messages_so_far=[],                     # ignored by new runner
                 tools=dynamic_manager,
                 system_prompt=system_prompt,
                 context_manager=context_manager,
@@ -156,11 +155,14 @@ class HeadlessAgentRunner:
             ):
                 current_iteration += 1
 
-                if event_type == "content_delta":
+                if event_type == "step_start":
+                    print(f"\n[{current_iteration}] Starting iteration {payload['iteration']}")
+
+                elif event_type == "content_delta":
                     print(payload, end="", flush=True)
 
                 elif event_type == "tool_start":
-                    print(f"\n🔧 {payload['name']} {payload['args']}")
+                    print(f"\n🔧 TOOL: {payload['name']} {payload.get('args', {})}")
                     self._write_status(
                         "running",
                         prompt=prompt,
@@ -170,37 +172,46 @@ class HeadlessAgentRunner:
                     )
 
                 elif event_type == "tool_result":
-                    res = payload.get("result", "")
                     name = payload.get("name", "unknown")
+                    res = str(payload.get("result", ""))
                     if payload.get("error"):
-                        print(f"\n❌ {res}")
-                        self._write_status(
-                            "error",
-                            prompt=prompt,
-                            iteration=current_iteration,
-                            last_tool=name,
-                            error=str(res)[:300],
-                        )
+                        print(f"\n❌ {name} failed: {res[:400]}")
+                        self._write_status("error", prompt=prompt, iteration=current_iteration, error=res[:300])
                     else:
-                        res_str = str(res)
-                        print(
-                            f"\n✅ {res_str[:300]}{'...' if len(res_str) > 300 else ''}"
-                        )
+                        print(f"\n✅ {name} → {res[:400]}{'...' if len(res) > 400 else ''}")
                         self._write_status(
                             "running",
                             prompt=prompt,
                             iteration=current_iteration,
                             last_tool=name,
-                            message=f"Tool result: {res_str[:120]}...",
+                            message=f"Tool result: {res[:150]}...",
                         )
+
+                elif event_type == "tool_calls":
+                    print(f"\nCalling {len(payload)} tool(s)...")
+
+                elif event_type == "reflection_triggered":
+                    print("\n" + "=" * 60)
+                    print("🤔 AGENT REFLECTION")
+                    print("=" * 60)
+                    print(payload.strip())
+                    print("=" * 60)
+
+                elif event_type == "progress_summary":
+                    print("\n📋 First-run Summary:")
+                    print(payload.strip())
+
+                elif event_type == "continuation_query_added":
+                    print("\n🔄 Continuing with new goal from reflection...")
 
                 elif event_type == "final_answer":
                     self._success = True
-                    print("\n\n" + "=" * 80)
+                    print("\n" + "=" * 80)
                     print("🤖 FINAL ANSWER")
                     print("=" * 80)
                     print(payload)
                     print("=" * 80)
+
                     self._write_status(
                         "success",
                         prompt=prompt,
@@ -214,7 +225,10 @@ class HeadlessAgentRunner:
                         self._write_status("error", error=str(payload), force=True)
 
                 elif event_type == "needs_confirmation":
-                    print("\n⚠️  Needs confirmation - skipping in headless mode")
+                    print("\n⚠️ Needs confirmation — skipping in headless mode")
+
+                elif event_type == "finish" and payload.get("reason") == "max_iterations_reached":
+                    print("\n⚠️ Max iterations reached — forced reflection used as final answer")
 
         except asyncio.CancelledError:
             print("\nAgent loop cancelled")
@@ -231,9 +245,7 @@ class HeadlessAgentRunner:
             if self._success:
                 self._write_status("success", force=True)
             else:
-                current = (
-                    self.status_path.read_text() if self.status_path.exists() else "{}"
-                )
+                current = self.status_path.read_text() if self.status_path.exists() else "{}"
                 data = json.loads(current)
                 if data.get("status") not in ("success", "cancelled", "error"):
                     self._write_status("failed", force=True)

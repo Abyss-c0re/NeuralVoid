@@ -318,37 +318,12 @@ class LLMChatApp(App):
     ) -> None:
         import time
 
-        logger.info("🚀 stream_llm START | prompt=%s", prompt[:200])
+        logger.info("🚀 stream_llm START | prompt=%s...", prompt[:150])
 
-        assistant_msg = message
+        # Start with the bubble passed from on_input_submitted
+        current_msg: Message = message
         text_buffer: str = ""
-        self._last_stream_update = time.time() - 0.1  # force first update
-
-        # Prepare messages (unchanged)
-        messages = [
-            {"role": "system", "content": self.system_prompt or ""}
-        ] + self.conversation[-15:]
-
-        # Context enrichment (unchanged)
-        if self.context_manager:
-            try:
-                context_history = await self.context_manager.generate_prompt(
-                    prompt, num_messages=0
-                )
-                if context_history and context_history[-1].get("content"):
-                    last_msg = context_history[-1]["content"]
-                    if "\nUser query:" in last_msg:
-                        ctx_part = last_msg.split("\nUser query:")[0].strip()
-                        if ctx_part:
-                            messages.insert(
-                                1,
-                                {
-                                    "role": "system",
-                                    "content": f"Relevant context:\n{ctx_part}",
-                                },
-                            )
-            except Exception as e:
-                logger.error("❌ History enrichment failed: %s", e, exc_info=True)
+        self._last_stream_update = time.time() - 0.1
 
         runner = AgentRunner(
             client=self.client,
@@ -358,105 +333,127 @@ class LLMChatApp(App):
         )
 
         async def _ui_update(new_buffer: str, immediate: bool = False):
-            """Single place that decides when to render."""
+            nonlocal current_msg
             now = time.time()
-
-            # Debounce normal streaming text
             if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
                 return
-
-            # Prevent duplicate renders
-            if assistant_msg.buffer != new_buffer:
-                assistant_msg.buffer = new_buffer
-                assistant_msg.update(assistant_msg.render_markdown())
+            if current_msg.buffer != new_buffer:
+                current_msg.buffer = new_buffer
+                current_msg.update(current_msg.render_markdown())
                 self.chat.scroll_end(animate=False)
                 self._last_stream_update = now
+
+        async def _new_assistant_bubble() -> Message:
+            """Create + mount a fresh assistant message for reflection/continuation turns."""
+            new_bubble = Message("assistant", "")
+            self.chat.add(new_bubble)
+            return new_bubble
 
         try:
             async for event_type, payload in runner.run(
                 user_prompt=prompt,
-                messages_so_far=messages,
+                messages_so_far=[],
                 tools=tools or [],
                 system_prompt=self.system_prompt or "",
                 context_manager=self.context_manager,
             ):
+                # Normal streaming
                 if event_type == "content_delta":
                     text_buffer += payload
-                    await _ui_update(text_buffer, immediate=False)
+                    await _ui_update(text_buffer)
 
+                # Tools (unchanged – stay in current bubble)
                 elif event_type == "tool_start":
-                    tool_md = self._build_tool_markdown(
-                        name=payload["name"],
-                        args=payload.get("args", {}),
-                    )
-                    text_buffer += tool_md
+                    md = self._build_tool_markdown(name=payload["name"], args=payload.get("args", {}))
+                    text_buffer += f"\n\n{md}"
                     await _ui_update(text_buffer, immediate=True)
 
                 elif event_type == "tool_result":
-                    tool_md = self._build_tool_markdown(
+                    md = self._build_tool_markdown(
                         name=payload["name"],
                         args=payload.get("args", {}),
                         result=str(payload.get("result", "")),
                         error=payload.get("error", False),
                     )
-                    text_buffer += tool_md
+                    text_buffer += f"\n{md}"
                     await _ui_update(text_buffer, immediate=True)
 
+                elif event_type == "tool_calls":
+                    text_buffer += f"\n\n**Calling {len(payload)} tool(s)...**\n"
+                    await _ui_update(text_buffer, immediate=True)
+
+                # Needs confirmation (unchanged)
                 elif event_type == "needs_confirmation":
-                    tool_md = self._build_tool_markdown(
+                    md = self._build_tool_markdown(
                         name=payload["name"],
                         args=payload["args"],
                         confirmation=payload.get("preview", ""),
                     )
-                    text_buffer += tool_md
+                    text_buffer += f"\n\n{md}\n\n**Requires confirmation**"
+                    await _ui_update(text_buffer, immediate=True)
+                    self.waiting_for_confirmation = True
+                    self.pending_confirmation = {**payload}
+                    return
+
+                # ── CRITICAL FIX: Continuation / Reflection ─────────────────
+                elif event_type in ("reflection_triggered", "progress_summary", "continuation_query_added"):
+                    # Finalize current bubble
+                    if text_buffer.strip():
+                        current_msg.buffer = text_buffer.strip()
+                        current_msg.update(current_msg.render_markdown())
+
+                    # Start a brand new bubble for the next phase
+                    current_msg = await _new_assistant_bubble()
+                    text_buffer = ""
+
+                    if event_type == "reflection_triggered":
+                        text_buffer += (
+                            f"\n\n---\n**🤔 Agent Reflection**\n"
+                            f"{str(payload).strip()}\n"
+                            "---\n\n"
+                        )
+                    elif event_type == "progress_summary":
+                        text_buffer += f"\n\n**📋 First-run Summary**\n{str(payload).strip()}\n\n"
+                    elif event_type == "continuation_query_added":
+                        text_buffer += f"**🔄 Continuing with new goal:**\n{str(payload)[:400]}...\n\n"
+
                     await _ui_update(text_buffer, immediate=True)
 
-                    self.waiting_for_confirmation = True
-                    self.pending_confirmation = {...}  # your existing dict (unchanged)
-                    return  # pause stream
-
+                # Final answer
                 elif event_type == "final_answer":
                     final_text = str(payload).strip()
-                    # FINAL OVERRIDE → guarantees no double text
                     text_buffer = final_text
                     await _ui_update(text_buffer, immediate=True)
-                    self.conversation.append({"role": "assistant", "content": payload})
+                    self.conversation.append({"role": "assistant", "content": final_text})
 
+                # Other events
                 elif event_type == "cancelled":
-                    text_buffer += f"\n\n🛑 **Stream cancelled** — {payload or 'user requested stop'}"
+                    text_buffer += f"\n\n🛑 **Cancelled**: {payload or 'user requested stop'}"
                     await _ui_update(text_buffer, immediate=True)
                     return
 
                 elif event_type == "error":
-                    text_buffer += f"\n\n❌ **Error:** {payload}"
+                    text_buffer += f"\n\n❌ **Error**: {payload}"
                     await _ui_update(text_buffer, immediate=True)
                     return
 
-                elif (
-                    event_type == "finish"
-                    and payload.get("reason") == "max_iterations_reached"
-                ):
-                    text_buffer += "\n\n⚠️ Max iterations reached."
-                    await _ui_update(text_buffer, immediate=True)
-
-                # Optional fallback
-                if (
-                    event_type in ("tool_start", "tool_result")
-                    and not text_buffer.strip()
-                ):
-                    text_buffer = "Thinking…\n\n"
+                elif event_type in ("warning", "finish"):
+                    text_buffer += f"\n\n⚠️ {payload}"
                     await _ui_update(text_buffer, immediate=True)
 
         except asyncio.CancelledError:
-            text_buffer += "\n\n🛑 **Agent loop cancelled**"
+            text_buffer += "\n\n🛑 **Agent loop cancelled by user**"
             await _ui_update(text_buffer, immediate=True)
 
         except Exception as exc:
-            logger.exception("🔥 Unexpected crash in stream_llm")
-            text_buffer += f"\n\n❌ **Unexpected error:** {exc}"
+            logger.exception("stream_llm crashed")
+            text_buffer += f"\n\n❌ **Unexpected crash**: {exc}"
             await _ui_update(text_buffer, immediate=True)
 
-        logger.info("✅ stream_llm END")
+        finally:
+            if not text_buffer.strip():
+                text_buffer = "No response generated."
+            await _ui_update(text_buffer, immediate=True)
 
     async def action_clear_chat(self):
         self.chat.remove_children()
