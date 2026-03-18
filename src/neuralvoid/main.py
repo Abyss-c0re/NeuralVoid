@@ -1,3 +1,4 @@
+import os
 import sys
 import asyncio
 from pathlib import Path
@@ -26,6 +27,12 @@ logger = Logger.get_logger(renderer=get_renderer())
 def main():
     # ───────────────────────────── CLI ─────────────────────────────
     args = CLIParser().parse()
+
+    if args.config:  # Check if a specific config path is passed via CLI
+        os.environ["APP_CONFIG"] = args.config
+    else:
+        # If no config path is passed, set a default config path (optional)
+        os.environ["APP_CONFIG"] = str(Path.home() / ".neuralcore" / "config.yaml")
 
     # ───────────────────────────── CONFIG ──────────────────────────
     loader = ConfigLoader(cli_path=args.config)
