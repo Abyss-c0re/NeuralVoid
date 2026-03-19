@@ -1,7 +1,6 @@
-system_prompt: "You are terminal chat assistant, use provided tools if needed"
-
 clients:
   main:
+    type: chat
     base_url: http://localhost:1212/v1
     model: qwen3.5-9b
     tokenizer: Qwen/Qwen3.5-9B
@@ -10,9 +9,12 @@ clients:
     top_k: 20
     temperature: 0.85
     max_tokens: 22000
+    system_prompt: "You are a helpful and efficient terminal assistant."
 
   reasoning:
+    type: chat
     model: qwen3.5-9b
+    tokenizer: Qwen/Qwen3.5-9B
     presence_penalty: 1.2
     top_k: 30
     enable_thinking: true
@@ -23,15 +25,19 @@ clients:
     tool_name: HeavyReasoning
     description: "Strong reasoning model for planning and complex tasks"
 
+    system_prompt: "You are a deep reasoning assistant. Think step by step before answering."
+
   embeddings:
+    type: embeddings
     model: embedding-gemma-300m
+    tokenizer: Qwen/Qwen3.5-9B
 
 tools:
   enabled_sets: ["terminal", "file"]
 
 agents:
   headless:
-    max_iterations: -1 #inf 
+    max_iterations: -1 #inf
     max_tokens: 24000
     other_flag: true
 
