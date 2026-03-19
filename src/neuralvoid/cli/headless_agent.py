@@ -209,8 +209,21 @@ class HeadlessAgentRunner:
                     print(f"\nCalling {len(payload)} tool(s)...")
 
                 elif event_type == "tool_call_delta":  # matches current AgentRunner
-                    tool_name = payload.get("function", {}).get("name", "unknown")
-                    print(f"\n🔧 {tool_name} (streaming tool call...)")
+                    # Try to get the name from full function dict, or fallback to payload fields
+                    func = payload.get("function", {})
+                    tool_name = func.get("name") or payload.get("name") or "unknown"
+
+                    # Get incremental args (delta) safely
+                    args_delta = func.get("arguments") or payload.get("arguments_delta")
+                    if isinstance(args_delta, str):
+                        # truncate long output for CLI
+                        display_args = args_delta[:60] + ("…" if len(args_delta) > 60 else "")
+                    elif isinstance(args_delta, dict):
+                        display_args = json.dumps(args_delta, indent=None)[:60] + ("…" if len(json.dumps(args_delta)) > 60 else "")
+                    else:
+                        display_args = ""
+
+                    print(f"\n🔧 Tool: {tool_name} (args delta: {display_args})")
 
                 elif event_type == "reflection_triggered":
                     print("\n" + "=" * 60)

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 
 from typing import Optional, Union, List, Any, Dict
@@ -298,6 +299,7 @@ class LLMChatApp(App):
     ) -> None:
         import time
         import asyncio
+
         level = getattr(self, "tool_rendering", "off")
 
         logger.info("🚀 stream_llm START | prompt=%s...", prompt[:150])
@@ -343,17 +345,40 @@ class LLMChatApp(App):
                 context_manager=self.context_manager,
             ):
                 # ── Content streaming ─────────────────────────────
-                if event_type == "content_delta":
-                    text_buffer += payload
-                    pure_assistant_text += payload
-                    await _ui_update(text_buffer)
-
                 # ── Tool lifecycle ────────────────────────────────
-                elif event_type == "tool_start":
+
+                if event_type == "tool_call_delta":
+                    # Try to get name and args incrementally from either full function dict or payload fields
+                    func = payload.get("function", {})
+                    name = func.get("name") or payload.get("name") or "unknown"
+
+                    # Build partial args dict from delta (if available)
+                    args = func.get("arguments") or payload.get("arguments_delta")
+                    if isinstance(args, str):
+                        # show only partial delta in a minimal JSON-like snippet
+                        try:
+                            # attempt to parse incremental JSON, fallback to raw string
+                            parsed = json.loads(args)
+                            args_dict = (
+                                parsed
+                                if isinstance(parsed, dict)
+                                else {"_partial": args}
+                            )
+                        except Exception:
+                            args_dict = {"_partial": args}
+                    elif isinstance(args, dict):
+                        args_dict = args
+                    else:
+                        args_dict = {}
+
+                    # Render using your existing _build_tool_markdown for consistent Markdown
                     md = _build_tool_markdown(
-                        name=payload["name"],
-                        args=payload.get("args", {}),
-                        level= level
+                        name=name,
+                        args=args_dict,
+                        level=level,
+                        result=None,
+                        confirmation=None,
+                        error=False,
                     )
                     text_buffer += md
                     await _ui_update(text_buffer, immediate=True)
@@ -364,7 +389,7 @@ class LLMChatApp(App):
                         args=payload.get("args", {}),
                         result=str(payload.get("result", "")),
                         error=payload.get("error", False),
-                        level= level
+                        level=level,
                     )
                     text_buffer += md
                     await _ui_update(text_buffer, immediate=True)
@@ -391,7 +416,7 @@ class LLMChatApp(App):
                         name=payload.get("name", "unknown"),
                         args=payload.get("args", {}),
                         confirmation=payload.get("preview", ""),
-                        level= level
+                        level=level,
                     )
                     text_buffer += (
                         f"\n\n{md}\n\n**Requires confirmation — type YES to approve**"
