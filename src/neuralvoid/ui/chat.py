@@ -3,7 +3,6 @@ import json
 
 from typing import Optional, Union, List, Any, Dict
 
-
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Markdown
 from textual.containers import VerticalScroll
@@ -73,11 +72,13 @@ class LLMChatApp(App):
     system_prompt: Optional[str]
     waiting_for_confirmation: bool = False
     pending_confirmation: Optional[dict] = None
+    _current_stream_task: asyncio.Task | None = None
     UPDATE_INTERVAL = 0.01
 
     BINDINGS = [
         Binding("ctrl+l", "clear_chat", "Clear"),
         Binding("ctrl+c", "quit", "Quit"),
+        Binding("escape", "stop_stream", "Stop generation", show=True, priority=True),
     ]
 
     CSS = """
@@ -156,6 +157,24 @@ class LLMChatApp(App):
         # ← NEW: Auto-focus input on startup
         self.query_one(Input).focus()
 
+    def action_stop_stream(self) -> None:
+        if self._current_stream_task is None:
+            self.notify("No active generation to stop.", timeout=2.5)
+            return
+
+        if not self._current_stream_task.done():
+            cancelled = self._current_stream_task.cancel("user requested stop via Esc")
+            if cancelled:
+                self.notify(
+                    "🛑 Generation cancelled (Esc pressed)",
+                    severity="warning",
+                    timeout=4,
+                )
+            else:
+                self.notify("Task already finishing …")
+        else:
+            self.notify("Generation already finished.")
+
     async def _handle_confirmation_response(self, user_input: str) -> bool:
         """
         Returns True if this input was treated as confirmation answer
@@ -230,45 +249,45 @@ class LLMChatApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
-        event.input.value = ""  # clear immediately
-        # self.query_one("#input", Input).focus()  # keep focus for next input
+        event.input.value = ""
 
         if not value:
             return
 
         cmd = value.lower()
 
-        # ── Special commands ─────────────────────────────────────
         if cmd in ("stop", "cancel"):
-            if self.client.stop_stream():
-                self.chat.add(
-                    Message(
-                        "system",
-                        "🛑 **Stop signal sent** — current stream will end soon.",
-                    )
-                )
-            else:
-                self.chat.add(Message("system", "ℹ️ No active stream to stop."))
-            return  # do NOT treat as user message
+            self.action_stop_stream()  # ← reuse the same logic
+            return
 
         elif cmd == "exit":
             self.chat.add(Message("system", "👋 Exiting..."))
-            await asyncio.sleep(0.3)  # let the message appear
+            await asyncio.sleep(0.3)
             self.exit()
             return
 
-        # ── Confirmation handling (unchanged) ────────────────────
         if await self._handle_confirmation_response(value):
             return
 
-        # ── Normal user message flow (unchanged) ─────────────────
+        # Normal message flow
         self.chat.add(Message("user", value))
         self.conversation.append({"role": "user", "content": value})
 
         assistant_msg = Message("assistant", "")
         self.chat.add(assistant_msg)
 
-        asyncio.create_task(self.stream_llm(value, assistant_msg, self.tools))
+        # ── The important change ────────────────────────────────────────
+        task = asyncio.create_task(
+            self.stream_llm(value, assistant_msg, self.tools), name="llm-stream"
+        )
+        self._current_stream_task = task
+
+        # Optional: clean up reference when done
+        def on_stream_done(fut: asyncio.Future) -> None:
+            if fut is self._current_stream_task:
+                self._current_stream_task = None
+
+        task.add_done_callback(on_stream_done)
 
     def _build_tool_markdown(
         self,
@@ -381,15 +400,17 @@ class LLMChatApp(App):
 
                 elif event_type == "tool_calls":
                     count = len(payload)
-                    text_buffer += f"\n\n**Calling {count} tool{'s' if count != 1 else ''}...**\n"
+                    text_buffer += (
+                        f"\n\n**Calling {count} tool{'s' if count != 1 else ''}...**\n"
+                    )
                     await _ui_update(text_buffer, immediate=True)
 
-                elif event_type == "tool_call_delta":
-                    func = payload.get("function", {})
-                    name = func.get("name", "unknown")
-                    args_part = func.get("arguments", "")[:60]
-                    text_buffer += f"\n🔧 **Tool**: {name}  (args: {args_part}…)"
-                    await _ui_update(text_buffer)
+                # elif event_type == "tool_call_delta":
+                #     func = payload.get("function", {})
+                #     name = func.get("name", "unknown")
+                #     args_part = func.get("arguments", "")[:60]
+                #     text_buffer += f"\n🔧 **Tool**: {name}  (args: {args_part}…)"
+                #     await _ui_update(text_buffer)
 
                 # ── Confirmation handling ─────────────────────────────────────
                 elif event_type == "needs_confirmation":
@@ -398,12 +419,14 @@ class LLMChatApp(App):
                         args=payload["args"],
                         confirmation=payload.get("preview", ""),
                     )
-                    text_buffer += f"\n\n{md}\n\n**Requires confirmation — type YES to approve**"
+                    text_buffer += (
+                        f"\n\n{md}\n\n**Requires confirmation — type YES to approve**"
+                    )
                     await _ui_update(text_buffer, immediate=True)
 
                     self.waiting_for_confirmation = True
                     self.pending_confirmation = {**payload}
-                    return   # ← important: pause streaming here
+                    return  # ← important: pause streaming here
 
                 # ── Agent phases / reflection / continuation ──────────────────
                 elif event_type in (
@@ -422,7 +445,9 @@ class LLMChatApp(App):
                     # if event_type == "reflection_triggered":
                     #     text_buffer += f"\n\n---\n**🤔 Agent Reflection**\n{str(payload).strip()}\n---\n\n"
                     if event_type == "progress_summary":
-                        text_buffer += f"\n\n**📋 First-run Summary**\n{str(payload).strip()}\n\n"
+                        text_buffer += (
+                            f"\n\n**📋 First-run Summary**\n{str(payload).strip()}\n\n"
+                        )
                     elif event_type == "continuation_query_added":
                         text_buffer += f"**🔄 Continuing — new sub-goal:**\n{str(payload)[:500]}...\n\n"
 
@@ -432,28 +457,32 @@ class LLMChatApp(App):
                 elif event_type == "final_summary":
                     text_buffer = str(payload).strip()
                     await _ui_update(text_buffer, immediate=True)
-                    self.conversation.append({"role": "assistant", "content": text_buffer})
+                    self.conversation.append(
+                        {"role": "assistant", "content": text_buffer}
+                    )
 
                 elif event_type == "review_phase":
                     if isinstance(payload, dict) and "summary" in payload:
                         summary_text = payload["summary"].strip()
-                        
+
                         # Optional: try to detect and format numbered questions nicely
                         lines = summary_text.split("\n")
                         formatted = []
                         in_code = False
-                        
+
                         for line in lines:
                             line = line.rstrip()
                             if line.startswith("```") or line.startswith("bash"):
                                 in_code = not in_code
-                                formatted.append("```bash" if "bash" in line.lower() else "```")
+                                formatted.append(
+                                    "```bash" if "bash" in line.lower() else "```"
+                                )
                                 continue
-                                
+
                             if in_code:
                                 formatted.append(line)
                                 continue
-                                
+
                             # Numbered items get bold labels
                             if line.strip().startswith(("1.", "2.", "3.")):
                                 num, rest = line.split(".", 1)
@@ -463,20 +492,19 @@ class LLMChatApp(App):
                                 formatted.append(line)
                             else:
                                 formatted.append("")  # keep blank lines
-                        
+
                         if in_code:
                             formatted.append("```")
-                        
+
                         nice_summary = "\n".join(formatted).strip()
-                        
+
                         display_text = (
-                            f"\n\n---\n"
-                            f"**🔍 Review Phase**\n\n"
-                            f"{nice_summary}\n"
-                            f"---\n\n"
+                            f"\n\n---\n**🔍 Review Phase**\n\n{nice_summary}\n---\n\n"
                         )
                     else:
-                        display_text = f"\n\n---\n**🔍 Review Phase**\n{str(payload)}\n---\n\n"
+                        display_text = (
+                            f"\n\n---\n**🔍 Review Phase**\n{str(payload)}\n---\n\n"
+                        )
 
                     text_buffer += display_text
                     await _ui_update(text_buffer, immediate=True)
@@ -484,7 +512,9 @@ class LLMChatApp(App):
                 elif event_type == "final_answer":
                     text_buffer = str(payload).strip()
                     await _ui_update(text_buffer, immediate=True)
-                    self.conversation.append({"role": "assistant", "content": text_buffer})
+                    self.conversation.append(
+                        {"role": "assistant", "content": text_buffer}
+                    )
 
                 # ── Meta / status / errors ────────────────────────────────────
                 elif event_type == "step_start":
@@ -505,7 +535,9 @@ class LLMChatApp(App):
                     await _ui_update(text_buffer)
 
                 elif event_type == "cancelled":
-                    text_buffer += f"\n\n🛑 **Cancelled**: {payload or 'user requested stop'}"
+                    text_buffer += (
+                        f"\n\n🛑 **Cancelled**: {payload or 'user requested stop'}"
+                    )
                     await _ui_update(text_buffer, immediate=True)
                     return
 
@@ -531,7 +563,6 @@ class LLMChatApp(App):
             if not text_buffer.strip():
                 text_buffer = "No response generated."
             await _ui_update(text_buffer, immediate=True)
-
 
     async def action_clear_chat(self):
         self.chat.remove_children()
