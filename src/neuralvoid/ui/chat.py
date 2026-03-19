@@ -341,6 +341,7 @@ class LLMChatApp(App):
 
         current_msg: Message = message
         text_buffer: str = ""
+        pure_assistant_text: str = ""          # ← NEW: only real content (for casual cleanup)
         self._last_stream_update = time.time() - 0.1
 
         runner = AgentRunner(
@@ -353,10 +354,17 @@ class LLMChatApp(App):
         async def _ui_update(new_buffer: str, immediate: bool = False) -> None:
             nonlocal current_msg
             now = time.time()
+            
+            # ── NEW SNIPPET ─────────────────────────────────────────────────────
+            # Remove the marker for display only — no duplication of text content
+            display_buffer = new_buffer.replace("[FINAL_ANSWER_COMPLETE]", "")
+            # ────────────────────────────────────────────────────────────────────
+            
             if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
                 return
-            if current_msg.buffer != new_buffer:
-                current_msg.buffer = new_buffer
+                
+            if current_msg.buffer != display_buffer:          # ← compare clean version
+                current_msg.buffer = display_buffer           # ← store clean version
                 current_msg.update(current_msg.render_markdown())
                 self.chat.scroll_end(animate=False)
                 self._last_stream_update = now
@@ -374,9 +382,10 @@ class LLMChatApp(App):
                 system_prompt=self.system_prompt or "",
                 context_manager=self.context_manager,
             ):
-                # ── Content streaming ────────────────────────────────────────
+                # ── Pure content (always captured for casual cleanup) ─────────────
                 if event_type == "content_delta":
                     text_buffer += payload
+                    pure_assistant_text += payload
                     await _ui_update(text_buffer)
 
                 # ── Tool lifecycle events ─────────────────────────────────────
@@ -405,18 +414,18 @@ class LLMChatApp(App):
                     )
                     await _ui_update(text_buffer, immediate=True)
 
-                # elif event_type == "tool_call_delta":
-                #     func = payload.get("function", {})
-                #     name = func.get("name", "unknown")
-                #     args_part = func.get("arguments", "")[:60]
-                #     text_buffer += f"\n🔧 **Tool**: {name}  (args: {args_part}…)"
-                #     await _ui_update(text_buffer)
+                elif event_type == "tool_call_delta":
+                    func = payload.get("function", {})
+                    name = func.get("name", "unknown")
+                    args_part = func.get("arguments", "")[:60]
+                    text_buffer += f"\n🔧 **Tool**: {name}  (args: {args_part}…)"
+                    await _ui_update(text_buffer, immediate=True)
 
                 # ── Confirmation handling ─────────────────────────────────────
                 elif event_type == "needs_confirmation":
                     md = self._build_tool_markdown(
-                        name=payload["name"],
-                        args=payload["args"],
+                        name=payload.get("name", "unknown"),
+                        args=payload.get("args", {}),
                         confirmation=payload.get("preview", ""),
                     )
                     text_buffer += (
@@ -426,36 +435,23 @@ class LLMChatApp(App):
 
                     self.waiting_for_confirmation = True
                     self.pending_confirmation = {**payload}
-                    return  # ← important: pause streaming here
+                    return
 
-                # ── Agent phases / reflection / continuation ──────────────────
-                elif event_type in (
-                    "reflection_triggered",
-                    "progress_summary",
-                    "continuation_query_added",
-                ):
-                    # Finalize current bubble before switching
+                # ── Agent phases / reflection ─────────────────────────────────
+                elif event_type == "reflection_triggered":
                     if text_buffer.strip():
                         current_msg.buffer = text_buffer.strip()
                         current_msg.update(current_msg.render_markdown())
-
                     current_msg = await _new_assistant_bubble()
                     text_buffer = ""
-
-                    # if event_type == "reflection_triggered":
-                    #     text_buffer += f"\n\n---\n**🤔 Agent Reflection**\n{str(payload).strip()}\n---\n\n"
-                    if event_type == "progress_summary":
-                        text_buffer += (
-                            f"\n\n**📋 First-run Summary**\n{str(payload).strip()}\n\n"
-                        )
-                    elif event_type == "continuation_query_added":
-                        text_buffer += f"**🔄 Continuing — new sub-goal:**\n{str(payload)[:500]}...\n\n"
-
+                    pure_assistant_text = ""
+                    text_buffer += f"\n\n---\n**🤔 Agent Reflection**\n{str(payload).strip()}\n---\n\n"
                     await _ui_update(text_buffer, immediate=True)
 
                 # ── Final outputs & summaries ─────────────────────────────────
                 elif event_type == "final_summary":
                     text_buffer = str(payload).strip()
+                    pure_assistant_text = text_buffer  # summary is the final content
                     await _ui_update(text_buffer, immediate=True)
                     self.conversation.append(
                         {"role": "assistant", "content": text_buffer}
@@ -464,59 +460,36 @@ class LLMChatApp(App):
                 elif event_type == "review_phase":
                     if isinstance(payload, dict) and "summary" in payload:
                         summary_text = payload["summary"].strip()
-
-                        # Optional: try to detect and format numbered questions nicely
                         lines = summary_text.split("\n")
                         formatted = []
                         in_code = False
-
                         for line in lines:
                             line = line.rstrip()
-                            if line.startswith("```") or line.startswith("bash"):
+                            if line.startswith("```"):
                                 in_code = not in_code
-                                formatted.append(
-                                    "```bash" if "bash" in line.lower() else "```"
-                                )
+                                formatted.append(line)
                                 continue
-
                             if in_code:
                                 formatted.append(line)
                                 continue
-
-                            # Numbered items get bold labels
                             if line.strip().startswith(("1.", "2.", "3.")):
                                 num, rest = line.split(".", 1)
-                                rest = rest.strip()
-                                formatted.append(f"**{num}.** {rest}")
+                                formatted.append(f"**{num}.** {rest.strip()}")
                             elif line.strip():
                                 formatted.append(line)
                             else:
-                                formatted.append("")  # keep blank lines
-
+                                formatted.append("")
                         if in_code:
                             formatted.append("```")
-
                         nice_summary = "\n".join(formatted).strip()
-
-                        display_text = (
-                            f"\n\n---\n**🔍 Review Phase**\n\n{nice_summary}\n---\n\n"
-                        )
+                        display_text = f"\n\n---\n**🔍 Review Phase**\n\n{nice_summary}\n---\n\n"
                     else:
-                        display_text = (
-                            f"\n\n---\n**🔍 Review Phase**\n{str(payload)}\n---\n\n"
-                        )
+                        display_text = f"\n\n---\n**🔍 Review Phase**\n{str(payload)}\n---\n\n"
 
                     text_buffer += display_text
                     await _ui_update(text_buffer, immediate=True)
 
-                elif event_type == "final_answer":
-                    text_buffer = str(payload).strip()
-                    await _ui_update(text_buffer, immediate=True)
-                    self.conversation.append(
-                        {"role": "assistant", "content": text_buffer}
-                    )
-
-                # ── Meta / status / errors ────────────────────────────────────
+                # ── Meta / status (kept for agentic runs) ─────────────────────
                 elif event_type == "step_start":
                     iter_num = payload.get("iteration", "?")
                     text_buffer += f"\n\n---\n**🔄 Iteration {iter_num} started**\n"
@@ -546,9 +519,23 @@ class LLMChatApp(App):
                     await _ui_update(text_buffer, immediate=True)
                     return
 
+                # ── CRITICAL: Casual chat cleanup (exactly what you asked for) ─────
                 elif event_type == "finish":
-                    text_buffer += f"\n\n**Finished**: {payload}"
-                    await _ui_update(text_buffer)
+                    reason = payload.get("reason", "unknown")
+                    if reason == "casual_complete":
+                        # Overwrite everything with the pure assistant text only
+                        text_buffer = pure_assistant_text.strip()
+                        await _ui_update(text_buffer, immediate=True)
+                        if text_buffer:
+                            self.conversation.append(
+                                {"role": "assistant", "content": text_buffer}
+                            )
+                        # No extra "Finished" line, no iteration, no LLM finished tag
+                    else:
+                        # Agentic / summary / error cases keep normal behaviour
+                        if reason not in ("task_complete", "normal"):
+                            text_buffer += f"\n\n**Finished**: {reason}"
+                        await _ui_update(text_buffer)
 
         except asyncio.CancelledError:
             text_buffer += "\n\n🛑 **Agent loop cancelled by user**"
