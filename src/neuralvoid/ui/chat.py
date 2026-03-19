@@ -1,5 +1,5 @@
 import asyncio
-import json
+
 
 from typing import Optional, Union, List, Any, Dict
 
@@ -13,6 +13,7 @@ from neuralcore.actions.actions import ActionSet
 from neuralcore.actions.manager import DynamicActionManager
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
+from neuralvoid.ui.helpers import _build_tool_markdown, _format_block, _format_text
 
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.agents.agent_core import AgentRunner
@@ -289,46 +290,6 @@ class LLMChatApp(App):
 
         task.add_done_callback(on_stream_done)
 
-    def _build_tool_markdown(
-        self,
-        name: str,
-        args: dict,
-        result: Optional[str] = None,
-        confirmation: Optional[str] = None,
-        error: bool = False,
-        error_message: Optional[str] = None,
-    ) -> str:
-        """Pure function: returns markdown to append. No UI calls."""
-        level = getattr(self, "tool_rendering", "off")
-        if level == "off":
-            return ""
-
-        parts: list[str] = []
-
-        if result is None and confirmation is None:
-            if level in ("info", "full"):
-                parts.append(
-                    f"\n\n🔧 **Calling tool:** `{name}`\n"
-                    f"```json\n{json.dumps(args, indent=2)}\n```"
-                )
-
-        if confirmation is not None:
-            parts.append(
-                f"\n⚠ **Confirmation required**\n{confirmation}\n\n"
-                f"Type **YES** to approve."
-            )
-
-        if result is not None:
-            if error:
-                if level in ("info", "full"):
-                    msg = error_message or result
-                    parts.append(f"\n❌ **Tool `{name}` failed**\n```\n{msg}\n```")
-            else:
-                if level == "full":
-                    parts.append(f"\n✅ **Result from `{name}`:**\n```\n{result}\n```")
-
-        return "".join(parts)
-
     async def stream_llm(
         self,
         prompt: str,
@@ -336,12 +297,14 @@ class LLMChatApp(App):
         tools: Optional[ToolProvider] = None,
     ) -> None:
         import time
+        import asyncio
+        level = getattr(self, "tool_rendering", "off")
 
         logger.info("🚀 stream_llm START | prompt=%s...", prompt[:150])
 
         current_msg: Message = message
         text_buffer: str = ""
-        pure_assistant_text: str = ""          # ← NEW: only real content (for casual cleanup)
+        pure_assistant_text: str = ""
         self._last_stream_update = time.time() - 0.1
 
         runner = AgentRunner(
@@ -354,17 +317,14 @@ class LLMChatApp(App):
         async def _ui_update(new_buffer: str, immediate: bool = False) -> None:
             nonlocal current_msg
             now = time.time()
-            
-            # ── NEW SNIPPET ─────────────────────────────────────────────────────
-            # Remove the marker for display only — no duplication of text content
+
             display_buffer = new_buffer.replace("[FINAL_ANSWER_COMPLETE]", "")
-            # ────────────────────────────────────────────────────────────────────
-            
+
             if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
                 return
-                
-            if current_msg.buffer != display_buffer:          # ← compare clean version
-                current_msg.buffer = display_buffer           # ← store clean version
+
+            if current_msg.buffer != display_buffer:
+                current_msg.buffer = display_buffer
                 current_msg.update(current_msg.render_markdown())
                 self.chat.scroll_end(animate=False)
                 self._last_stream_update = now
@@ -382,35 +342,39 @@ class LLMChatApp(App):
                 system_prompt=self.system_prompt or "",
                 context_manager=self.context_manager,
             ):
-                # ── Pure content (always captured for casual cleanup) ─────────────
+                # ── Content streaming ─────────────────────────────
                 if event_type == "content_delta":
                     text_buffer += payload
                     pure_assistant_text += payload
                     await _ui_update(text_buffer)
 
-                # ── Tool lifecycle events ─────────────────────────────────────
+                # ── Tool lifecycle ────────────────────────────────
                 elif event_type == "tool_start":
-                    md = self._build_tool_markdown(
+                    md = _build_tool_markdown(
                         name=payload["name"],
                         args=payload.get("args", {}),
+                        level= level
                     )
                     text_buffer += md
                     await _ui_update(text_buffer, immediate=True)
 
                 elif event_type == "tool_result":
-                    md = self._build_tool_markdown(
+                    md = _build_tool_markdown(
                         name=payload["name"],
                         args=payload.get("args", {}),
                         result=str(payload.get("result", "")),
                         error=payload.get("error", False),
+                        level= level
                     )
                     text_buffer += md
                     await _ui_update(text_buffer, immediate=True)
 
                 elif event_type == "tool_calls":
                     count = len(payload)
-                    text_buffer += (
-                        f"\n\n**Calling {count} tool{'s' if count != 1 else ''}...**\n"
+                    text_buffer += _format_block(
+                        "Tool Execution",
+                        f"Calling {count} tool{'s' if count != 1 else ''}...",
+                        "🛠️",
                     )
                     await _ui_update(text_buffer, immediate=True)
 
@@ -418,15 +382,16 @@ class LLMChatApp(App):
                     func = payload.get("function", {})
                     name = func.get("name", "unknown")
                     args_part = func.get("arguments", "")[:60]
-                    text_buffer += f"\n🔧 **Tool**: {name}  (args: {args_part}…)"
+                    text_buffer += f"\n🔧 **Tool**: {name} (args: {args_part}…)"
                     await _ui_update(text_buffer, immediate=True)
 
-                # ── Confirmation handling ─────────────────────────────────────
+                # ── Confirmation ────────────────────────────────
                 elif event_type == "needs_confirmation":
-                    md = self._build_tool_markdown(
+                    md = _build_tool_markdown(
                         name=payload.get("name", "unknown"),
                         args=payload.get("args", {}),
                         confirmation=payload.get("preview", ""),
+                        level= level
                     )
                     text_buffer += (
                         f"\n\n{md}\n\n**Requires confirmation — type YES to approve**"
@@ -437,113 +402,125 @@ class LLMChatApp(App):
                     self.pending_confirmation = {**payload}
                     return
 
-                # ── Agent phases / reflection ─────────────────────────────────
+                # ── Reflection ──────────────────────────────────
                 elif event_type == "reflection_triggered":
                     if text_buffer.strip():
                         current_msg.buffer = text_buffer.strip()
                         current_msg.update(current_msg.render_markdown())
+
                     current_msg = await _new_assistant_bubble()
                     text_buffer = ""
                     pure_assistant_text = ""
-                    text_buffer += f"\n\n---\n**🤔 Agent Reflection**\n{str(payload).strip()}\n---\n\n"
-                    await _ui_update(text_buffer, immediate=True)
 
-                # ── Final outputs & summaries ─────────────────────────────────
-                elif event_type == "final_summary":
-                    text_buffer = str(payload).strip()
-                    pure_assistant_text = text_buffer  # summary is the final content
-                    await _ui_update(text_buffer, immediate=True)
-                    self.conversation.append(
-                        {"role": "assistant", "content": text_buffer}
+                    text_buffer += _format_block(
+                        "Agent Reflection",
+                        str(payload).strip(),
+                        "🤔",
                     )
+                    await _ui_update(text_buffer, immediate=True)
 
+                # ── Review phase ────────────────────────────────
                 elif event_type == "review_phase":
                     if isinstance(payload, dict) and "summary" in payload:
-                        summary_text = payload["summary"].strip()
-                        lines = summary_text.split("\n")
-                        formatted = []
-                        in_code = False
-                        for line in lines:
-                            line = line.rstrip()
-                            if line.startswith("```"):
-                                in_code = not in_code
-                                formatted.append(line)
-                                continue
-                            if in_code:
-                                formatted.append(line)
-                                continue
-                            if line.strip().startswith(("1.", "2.", "3.")):
-                                num, rest = line.split(".", 1)
-                                formatted.append(f"**{num}.** {rest.strip()}")
-                            elif line.strip():
-                                formatted.append(line)
-                            else:
-                                formatted.append("")
-                        if in_code:
-                            formatted.append("```")
-                        nice_summary = "\n".join(formatted).strip()
-                        display_text = f"\n\n---\n**🔍 Review Phase**\n\n{nice_summary}\n---\n\n"
+                        nice_summary = _format_text(payload["summary"])
                     else:
-                        display_text = f"\n\n---\n**🔍 Review Phase**\n{str(payload)}\n---\n\n"
+                        nice_summary = str(payload)
 
-                    text_buffer += display_text
+                    text_buffer += _format_block(
+                        "Review Phase",
+                        nice_summary,
+                        "🔍",
+                    )
                     await _ui_update(text_buffer, immediate=True)
 
-                # ── Meta / status (kept for agentic runs) ─────────────────────
+                # ── Meta / status ───────────────────────────────
                 elif event_type == "step_start":
                     iter_num = payload.get("iteration", "?")
-                    text_buffer += f"\n\n---\n**🔄 Iteration {iter_num} started**\n"
+                    text_buffer += _format_block(
+                        f"Iteration {iter_num}",
+                        "Started",
+                        "🔄",
+                    )
                     await _ui_update(text_buffer)
 
                 elif event_type == "llm_finish":
-                    text_buffer += "\n\n**✅ LLM generation finished**\n"
+                    text_buffer += _format_block(
+                        "LLM Generation Finished",
+                        "Model completed its response.",
+                        "✅",
+                    )
                     await _ui_update(text_buffer)
 
                 elif event_type == "system":
-                    text_buffer += f"\n\n**🖥️ System**: {payload}\n"
+                    text_buffer += _format_block("System", payload, "🖥️")
                     await _ui_update(text_buffer)
 
                 elif event_type == "warning":
-                    text_buffer += f"\n\n⚠️ {payload}"
+                    text_buffer += _format_block("Warning", payload, "⚠️")
                     await _ui_update(text_buffer)
 
                 elif event_type == "cancelled":
-                    text_buffer += (
-                        f"\n\n🛑 **Cancelled**: {payload or 'user requested stop'}"
+                    text_buffer += _format_block(
+                        "Cancelled",
+                        payload or "user requested stop",
+                        "🛑",
                     )
                     await _ui_update(text_buffer, immediate=True)
                     return
 
                 elif event_type == "error":
-                    text_buffer += f"\n\n❌ **Error**: {payload}"
+                    text_buffer += _format_block("Error", payload, "❌")
                     await _ui_update(text_buffer, immediate=True)
                     return
 
-                # ── CRITICAL: Casual chat cleanup (exactly what you asked for) ─────
+                # ── Finish (clean + correct) ─────────────────────
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
+
                     if reason == "casual_complete":
-                        # Overwrite everything with the pure assistant text only
                         text_buffer = pure_assistant_text.strip()
                         await _ui_update(text_buffer, immediate=True)
+
                         if text_buffer:
                             self.conversation.append(
                                 {"role": "assistant", "content": text_buffer}
                             )
-                        # No extra "Finished" line, no iteration, no LLM finished tag
+                        return
+
+                    summary = payload.get("summary", "")
+
+                    if summary:
+                        summary = _format_text(summary)
+
+                        text_buffer += _format_block(
+                            f"Finished — {reason.replace('_', ' ').title()}",
+                            summary,
+                            "🏁",
+                        )
                     else:
-                        # Agentic / summary / error cases keep normal behaviour
-                        if reason not in ("task_complete", "normal"):
-                            text_buffer += f"\n\n**Finished**: {reason}"
-                        await _ui_update(text_buffer)
+                        text_buffer += _format_block(
+                            "Finished",
+                            reason,
+                            "🏁",
+                        )
+
+                    await _ui_update(text_buffer, immediate=True)
 
         except asyncio.CancelledError:
-            text_buffer += "\n\n🛑 **Agent loop cancelled by user**"
+            text_buffer += _format_block(
+                "Cancelled",
+                "Agent loop cancelled by user",
+                "🛑",
+            )
             await _ui_update(text_buffer, immediate=True)
 
         except Exception as exc:
             logger.exception("stream_llm crashed")
-            text_buffer += f"\n\n❌ **Unexpected crash**: {exc}"
+            text_buffer += _format_block(
+                "Crash",
+                str(exc),
+                "❌",
+            )
             await _ui_update(text_buffer, immediate=True)
 
         finally:
