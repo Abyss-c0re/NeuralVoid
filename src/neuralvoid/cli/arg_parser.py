@@ -56,6 +56,14 @@ class CLIParser:
         )
 
         deploy_group.add_argument(
+            "--agent",
+            type=str,
+            default=None,
+            metavar="AGENT_ID",
+            help="Specify which agent to deploy (default: the default agent in config).",
+        )
+
+        deploy_group.add_argument(
             "--status-file",
             type=self._json_file_path,  # <- validate JSON path extension only
             default="/tmp/neuralvoid/agent.status.json",
