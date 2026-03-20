@@ -1,417 +1,247 @@
-from neuralcore.actions.actions import Action, ActionSet
+from neuralcore.actions.manager import tool
+import os
+import subprocess
+import shutil
+from inspect import signature, _empty
 
-from neuralcore.utils.terminal_utils import *
+# ─────────────────────────────────────────────────────────────
+# FILESYSTEM / NAVIGATION
+# ─────────────────────────────────────────────────────────────
+
+
+@tool("TerminalTools", tags=["filesystem", "list", "navigation"], name="ls")
+def exec_ls(path: str = ".") -> str:
+    """List files in a directory."""
+    return subprocess.run(
+        ["ls", "-la", path], capture_output=True, text=True
+    ).stdout.strip()
+
+
+@tool("TerminalTools", tags=["filesystem", "directory", "current"], name="pwd")
+def exec_pwd() -> str:
+    """Print working directory."""
+    return os.getcwd()
+
+
+@tool("TerminalTools", tags=["filesystem", "directory", "navigation"], name="cd")
+def exec_cd(path: str) -> str:
+    """Change current working directory."""
+    try:
+        os.chdir(path)
+        return f"Changed directory to: {os.getcwd()}"
+    except FileNotFoundError:
+        return f"cd: no such file or directory: '{path}'"
+    except NotADirectoryError:
+        return f"cd: not a directory: '{path}'"
+    except PermissionError:
+        return f"cd: permission denied: '{path}'"
+    except Exception as e:
+        return f"cd error: {str(e)}"
 
 
 # ─────────────────────────────────────────────────────────────
-#  Action definitions (parameter names must match executors)
+# FILE OPERATIONS
 # ─────────────────────────────────────────────────────────────
 
-ls_action = Action(
-    name="ls",
-    description="List files in a directory",
-    tags=[
-        "filesystem",
-        "files",
-        "directory",
-        "list",
-        "browse",
-        "navigation",
-        "system",
-        "developer",
-        "inspect",
-    ],
-    parameters={
-        "path": {"type": "string", "description": "Directory path, default '.'"}
-    },
-    executor=exec_ls,
-    required=[],
-)
 
-pwd_action = Action(
-    name="pwd",
-    description="Print working directory",
-    tags=["filesystem", "directory", "path", "location", "current", "navigation"],
-    parameters={},
-    executor=exec_pwd,
-    required=[],
-)
+@tool("TerminalTools", tags=["filesystem", "file", "read"], name="cat")
+def exec_cat(file_path: str) -> str:
+    """Display file contents."""
+    return subprocess.run(
+        ["cat", file_path], capture_output=True, text=True
+    ).stdout.strip()
 
-cd_action = Action(
-    name="cd",
-    description="Change current working directory",
-    tags=[
-        "filesystem",
-        "directory",
-        "navigation",
-        "path",
-        "change",
-    ],
-    parameters={"path": {"type": "string", "description": "Directory to change to"}},
-    executor=exec_cd,
-    required=["path"],
-)
 
-cp_action = Action(
-    name="cp",
-    description="Copy a file or directory",
-    tags=[
-        "filesystem",
-        "file",
-        "directory",
-        "copy",
-        "duplicate",
-        "backup",
-        "replicate",
-    ],
-    parameters={
-        "source": {"type": "string"},
-        "destination": {"type": "string"},
-    },
-    executor=exec_cp,
-    required=["source", "destination"],
-)
+@tool("TerminalTools", tags=["filesystem", "file", "create"], name="touch")
+def exec_touch(file_path: str) -> str:
+    """Create empty file or update timestamp."""
+    subprocess.run(["touch", file_path], check=True)
+    return f"Touched '{file_path}'"
 
-mv_action = Action(
-    name="mv",
-    description="Move or rename a file/directory",
-    tags=["filesystem", "file", "directory", "move", "rename", "transfer", "organize"],
-    parameters={
-        "source": {"type": "string"},
-        "destination": {"type": "string"},
-    },
-    executor=exec_mv,
-    required=["source", "destination"],
-)
 
-mkdir_action = Action(
-    name="mkdir",
-    description="Create a new directory",
-    tags=["filesystem", "directory", "create", "folder", "structure", "project"],
-    parameters={"path": {"type": "string"}},
-    executor=exec_mkdir,
-    required=["path"],
-)
+@tool("TerminalTools", tags=["filesystem", "directory", "create"], name="mkdir")
+def exec_mkdir(path: str) -> str:
+    """Create a directory."""
+    subprocess.run(["mkdir", "-p", path], check=True)
+    return f"Directory created: '{path}'"
 
-cat_action = Action(
-    name="cat",
-    description="Display file contents",
-    tags=[
-        "filesystem",
-        "file",
-        "read",
-        "view",
-        "display",
-        "content",
-        "text",
-        "code",
-        "inspect",
-    ],
-    parameters={"file_path": {"type": "string", "description": "Path to the file"}},
-    executor=exec_cat,
-    required=["file_path"],
-)
 
-delete_file_action = Action(
+@tool("TerminalTools", tags=["filesystem", "file", "copy"], name="cp")
+def exec_cp(source: str, destination: str) -> str:
+    """Copy a file or directory."""
+    subprocess.run(["cp", source, destination], check=True)
+    return f"Copied '{source}' → '{destination}'"
+
+
+@tool("TerminalTools", tags=["filesystem", "file", "move"], name="mv")
+def exec_mv(source: str, destination: str) -> str:
+    """Move or rename a file or directory."""
+    subprocess.run(["mv", source, destination], check=True)
+    return f"Moved '{source}' → '{destination}'"
+
+
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "file", "delete"],
     name="delete_file",
-    description="Delete a file (requires human confirmation)",
-    tags=["filesystem", "file", "delete", "remove", "dangerous", "cleanup"],
-    parameters={"file_path": {"type": "string"}},
-    executor=exec_delete_file,
-    required=["file_path"],
     require_confirmation=True,
 )
+def exec_delete_file(file_path: str) -> str:
+    """Delete a file (requires confirmation)."""
+    if not os.path.isfile(file_path):
+        return f"File not found: '{file_path}'"
+    os.remove(file_path)
+    return f"Deleted file '{file_path}'"
 
-delete_dir_action = Action(
+
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "directory", "delete"],
     name="delete_dir",
-    description="Delete directory recursively",
-    tags=[
-        "filesystem",
-        "directory",
-        "delete",
-        "remove",
-        "recursive",
-        "dangerous",
-        "cleanup",
-    ],
-    parameters={"dir_path": {"type": "string"}},
-    executor=exec_delete_dir,
-    required=["dir_path"],
     require_confirmation=True,
 )
-
-find_action = Action(
-    name="find",
-    description="Find files in directory optionally by name",
-    tags=[
-        "filesystem",
-        "file",
-        "directory",
-        "search",
-        "lookup",
-        "locate",
-        "pattern",
-        "discover",
-    ],
-    parameters={
-        "path": {"type": "string"},
-        "name": {"type": "string"},
-    },
-    executor=exec_find,
-    required=[],
-)
-
-
-touch_action = Action(
-    name="touch",
-    description="Create empty file or update its timestamp",
-    tags=[
-        "filesystem",
-        "file",
-        "create",
-        "empty",
-        "timestamp",
-        "update",
-        "developer",
-        "shell",
-        "terminal",
-    ],
-    parameters={"file_path": {"type": "string", "description": "Path to the file"}},
-    executor=exec_touch,
-    required=["file_path"],
-)
-
-head_action = Action(
-    name="head",
-    description="Show first lines of a file",
-    tags=["filesystem", "file", "read", "preview", "text", "lines", "log", "inspect"],
-    parameters={
-        "file_path": {"type": "string", "description": "Path to the file"},
-        "lines": {"type": "integer", "description": "Number of lines", "default": 10},
-    },
-    executor=exec_head,
-    required=["file_path"],
-)
-
-tail_action = Action(
-    name="tail",
-    description="Show last lines of a file",
-    tags=["filesystem", "file", "read", "logs", "text", "monitor", "stream", "inspect"],
-    parameters={
-        "file_path": {"type": "string", "description": "Path to the file"},
-        "lines": {"type": "integer", "description": "Number of lines", "default": 10},
-    },
-    executor=exec_tail,
-    required=["file_path"],
-)
-
-wc_action = Action(
-    name="wc",
-    description="Count lines, words, characters in a file",
-    tags=[
-        "filesystem",
-        "file",
-        "analysis",
-        "count",
-        "lines",
-        "words",
-        "characters",
-        "text",
-        "statistics",
-        "developer",
-        "shell",
-    ],
-    parameters={
-        "file_path": {"type": "string"},
-        "lines": {"type": "boolean", "default": True},
-        "words": {"type": "boolean", "default": True},
-        "chars": {"type": "boolean", "default": False},
-    },
-    executor=exec_wc,
-    required=["file_path"],
-)
-
-
-grep_action = Action(
-    name="grep",
-    description="Search for pattern in file or directory",
-    tags=[
-        "filesystem",
-        "file",
-        "search",
-        "pattern",
-        "text",
-        "regex",
-        "code",
-        "log",
-        "analysis",
-    ],
-    parameters={
-        "pattern": {"type": "string"},
-        "file_path": {"type": "string"},
-        "recursive": {"type": "boolean", "default": False},
-        "case_sensitive": {"type": "boolean", "default": True},
-    },
-    executor=exec_grep,
-    required=["pattern", "file_path"],
-)
-
-
-tree_action = Action(
-    name="tree",
-    description="Display directory tree structure",
-    tags=[
-        "filesystem",
-        "directory",
-        "structure",
-        "hierarchy",
-        "inspect",
-        "visualize",
-        "navigation",
-        "project",
-        "developer",
-        "shell",
-    ],
-    parameters={
-        "path": {"type": "string"},
-        "max_depth": {"type": "integer", "default": 3},
-    },
-    executor=exec_tree,
-    required=[],
-)
-
-
-file_action = Action(
-    name="file",
-    description="Determine file type",
-    tags=[
-        "filesystem",
-        "file",
-        "type",
-        "format",
-        "metadata",
-        "inspect",
-        "analysis",
-        "developer",
-        "shell",
-    ],
-    parameters={"path": {"type": "string"}},
-    executor=exec_file,
-    required=["path"],
-)
-
-
-stat_action = Action(
-    name="stat",
-    description="Show detailed file status",
-    tags=[
-        "filesystem",
-        "file",
-        "metadata",
-        "permissions",
-        "size",
-        "timestamps",
-        "inspect",
-        "analysis",
-        "developer",
-        "system",
-    ],
-    parameters={"path": {"type": "string"}},
-    executor=exec_stat,
-    required=["path"],
-)
-
-
-realpath_action = Action(
-    name="realpath",
-    description="Resolve absolute path",
-    tags=[
-        "filesystem",
-        "path",
-        "absolute",
-        "resolve",
-        "navigation",
-        "location",
-        "developer",
-        "shell",
-    ],
-    parameters={"path": {"type": "string"}},
-    executor=exec_realpath,
-    required=["path"],
-)
-
-
-which_action = Action(
-    name="which",
-    description="Locate command in PATH",
-    tags=["system", "command", "binary", "executable", "path", "lookup", "environment"],
-    parameters={"command": {"type": "string"}},
-    executor=exec_which,
-    required=["command"],
-)
-
-
-awk_action = Action(
-    name="awk",
-    description="Process file with awk script",
-    tags=[
-        "filesystem",
-        "file",
-        "text",
-        "processing",
-        "transform",
-        "script",
-        "pattern",
-        "data",
-        "analysis",
-        "developer",
-        "shell",
-    ],
-    parameters={
-        "file_path": {"type": "string"},
-        "script": {"type": "string"},
-    },
-    executor=exec_awk,
-    required=["file_path", "script"],
-)
+def exec_delete_dir(dir_path: str) -> str:
+    """Delete a directory recursively (requires confirmation)."""
+    if not os.path.isdir(dir_path):
+        return f"Directory not found: '{dir_path}'"
+    shutil.rmtree(dir_path)
+    return f"Deleted directory '{dir_path}'"
 
 
 # ─────────────────────────────────────────────────────────────
-# Putting it all together
+# SEARCH & ANALYSIS
 # ─────────────────────────────────────────────────────────────
-def get_terminal_actions():
-    terminal_tools = ActionSet(
-        name="TerminalCommands",
-        description=(
-            "Standard shell-style commands for working directly in the terminal environment: "
-            "navigate directories (cd, pwd, ls), read/write files (cat, head, tail, write_file), "
-            "create/delete/move/copy (touch, mkdir, mv, cp, rm), search and analyze content "
-            "(grep, find, wc, awk, sed), view structure (tree), and get file metadata (stat, file, du)."
-        ),
+
+
+@tool("TerminalTools", tags=["filesystem", "search"], name="find")
+def exec_find(path: str = ".", name: str = "") -> str:
+    """Find files optionally by name."""
+    cmd = ["find", path]
+    if name:
+        cmd += ["-name", name]
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+@tool("TerminalTools", tags=["filesystem", "analysis", "text"], name="wc")
+def exec_wc(
+    file_path: str, lines: bool = True, words: bool = True, chars: bool = False
+) -> str:
+    """Count lines, words, characters in a file."""
+    flags = []
+    if lines:
+        flags.append("-l")
+    if words:
+        flags.append("-w")
+    if chars:
+        flags.append("-c")
+    if not flags:
+        flags = ["-lwc"]
+    return subprocess.run(
+        ["wc", *flags, file_path], capture_output=True, text=True
+    ).stdout.strip()
+
+
+@tool("TerminalTools", tags=["filesystem", "search", "regex"], name="grep")
+def exec_grep(
+    pattern: str, file_path: str, recursive: bool = False, case_sensitive: bool = True
+) -> str:
+    """Search for pattern in file or directory."""
+    cmd = ["grep"]
+    if not case_sensitive:
+        cmd.append("-i")
+    if recursive:
+        cmd.append("-r")
+    cmd += [pattern, file_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 1:
+        return "(no matches)"
+    elif result.returncode == 0:
+        return result.stdout.strip()
+    else:
+        return f"grep error: {result.stderr.strip() or '(exit code ' + str(result.returncode) + ')'}"
+
+
+# ─────────────────────────────────────────────────────────────
+# TEXT UTILITIES
+# ─────────────────────────────────────────────────────────────
+
+
+@tool("TerminalTools", tags=["filesystem", "text"], name="head")
+def exec_head(file_path: str, lines: int = 10) -> str:
+    """Show first N lines of a file."""
+    return subprocess.run(
+        ["head", "-n", str(lines), file_path], capture_output=True, text=True
+    ).stdout.rstrip()
+
+
+@tool("TerminalTools", tags=["filesystem", "text"], name="tail")
+def exec_tail(file_path: str, lines: int = 10) -> str:
+    """Show last N lines of a file."""
+    return subprocess.run(
+        ["tail", "-n", str(lines), file_path], capture_output=True, text=True
+    ).stdout.rstrip()
+
+
+@tool("TerminalTools", tags=["filesystem", "text"], name="awk")
+def exec_awk(file_path: str, script: str) -> str:
+    """Process file with awk script."""
+    cmd = ["awk", "-f", "-", file_path]
+    result = subprocess.run(cmd, input=script, capture_output=True, text=True)
+    return result.stdout or result.stderr
+
+
+# ─────────────────────────────────────────────────────────────
+# STRUCTURE & METADATA
+# ─────────────────────────────────────────────────────────────
+
+
+@tool("TerminalTools", tags=["filesystem", "directory"], name="tree")
+def exec_tree(path: str = ".", max_depth: int = 3) -> str:
+    """Display directory tree (requires tree command)."""
+    try:
+        result = subprocess.run(
+            ["tree", "-L", str(max_depth), path], capture_output=True, text=True
+        )
+        return (
+            result.stdout.rstrip()
+            if result.returncode == 0
+            else result.stderr.strip() or "tree command failed"
+        )
+    except FileNotFoundError:
+        return "tree command not available"
+
+
+@tool("TerminalTools", tags=["filesystem", "metadata"], name="stat")
+def exec_stat(path: str) -> str:
+    """Show file status."""
+    return subprocess.run(
+        ["stat", path], capture_output=True, text=True
+    ).stdout.rstrip()
+
+
+@tool("TerminalTools", tags=["filesystem", "metadata"], name="file")
+def exec_file(path: str) -> str:
+    """Determine file type."""
+    return subprocess.run(["file", path], capture_output=True, text=True).stdout.strip()
+
+
+@tool("TerminalTools", tags=["filesystem", "path"], name="realpath")
+def exec_realpath(path: str) -> str:
+    """Resolve absolute path."""
+    result = subprocess.run(["realpath", path], capture_output=True, text=True)
+    return (
+        result.stdout.strip()
+        if result.returncode == 0
+        else f"realpath failed: {result.stderr.strip()}"
     )
 
-    for act in [
-        pwd_action,
-        cd_action,
-        ls_action,
-        cat_action,
-        head_action,
-        tail_action,
-        touch_action,
-        mkdir_action,
-        mv_action,
-        cp_action,
-        delete_file_action,
-        delete_dir_action,
-        find_action,
-        wc_action,
-        grep_action,
-        tree_action,
-        file_action,
-        stat_action,
-        realpath_action,
-        which_action,
-        awk_action,
-    ]:
-        terminal_tools.add(act)
-    return terminal_tools
+
+@tool("TerminalTools", tags=["system", "command"], name="which")
+def exec_which(command: str) -> str:
+    """Locate command in PATH."""
+    result = subprocess.run(["which", command], capture_output=True, text=True)
+    return (
+        result.stdout.strip()
+        if result.returncode == 0
+        else f"{command} not found in PATH"
+    )
