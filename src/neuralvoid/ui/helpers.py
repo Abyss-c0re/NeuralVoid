@@ -2,10 +2,12 @@ import json
 
 from typing import Optional
 
+
 def _format_block(title: str, body: str, icon: str = "") -> str:
     title_line = f"**{icon} {title}**".strip()
     body = str(body).strip()
     return f"\n\n---\n{title_line}\n\n{body}\n---\n"
+
 
 def _format_text(text: str) -> str:
     lines = text.split("\n")
@@ -35,6 +37,7 @@ def _format_text(text: str) -> str:
 
     return "\n".join(formatted).strip()
 
+
 def _build_tool_markdown(
     name: str,
     args: dict,
@@ -44,33 +47,47 @@ def _build_tool_markdown(
     error: bool = False,
     error_message: Optional[str] = None,
 ) -> str:
-    """Pure function: returns markdown to append. No UI calls."""
-
+    """Pure Markdown version — no HTML. Works perfectly in any TUI."""
     if level == "off":
         return ""
 
     parts: list[str] = []
 
     if result is None and confirmation is None:
+        # Live tool call (partial)
         if level in ("compact", "full"):
             parts.append(
-                f"\n\n🔧 **Calling tool:** `{name}`\n"
-                f"```json\n{json.dumps(args, indent=2)}\n```"
+                f"🔧 **Calling tool:** `{name}`\n"
+                f"```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
             )
 
-    if confirmation is not None:
+    elif confirmation is not None:
         parts.append(
-            f"\n⚠ **Confirmation required**\n{confirmation}\n\n"
+            f"⚠️ **Confirmation required for `{name}`**\n{confirmation}\n\n"
             f"Type **YES** to approve."
         )
 
-    if result is not None:
-        if error:
-            if level in ("compact", "full"):
-                msg = error_message or result
-                parts.append(f"\n❌ **Tool `{name}` failed**\n```\n{msg}\n```")
-        else:
-            if level == "full":
-                parts.append(f"\n✅ **Result from `{name}`:**\n```\n{result}\n```")
+    else:
+        # Final result
+        status = "❌" if error else "✅"
+        title = f"{status} Tool `{name}` {'failed' if error else 'completed'}"
 
-    return "".join(parts)
+        parts.append(title)
+
+        if args and level in ("compact", "full"):
+            parts.append(
+                f"**Arguments**\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
+            )
+
+        if result is not None:
+            if error:
+                msg = error_message or result
+                parts.append(f"**Error**\n```\n{msg}\n```")
+            else:
+                if level == "full":
+                    parts.append(f"**Result**\n```\n{result}\n```")
+                else:  # compact
+                    preview = result[:400] + ("..." if len(result) > 400 else "")
+                    parts.append(f"**Result preview**\n```\n{preview}\n```")
+
+    return "\n\n" + "\n\n".join(parts) + "\n"

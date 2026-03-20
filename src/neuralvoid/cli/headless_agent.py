@@ -9,30 +9,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from neuralcore.agents.agent_core import AgentRunner  # adjust import as needed
+from neuralcore.agents.agent_core import AgentRunner
 
 
 class HeadlessAgentRunner:
     """
-    Runs an agent in a headless/shell-friendly way with:
-    - Graceful shutdown (Ctrl+C / SIGTERM)
-    - Status reporting via JSON file
-    - PID file to allow external stop/status checks
-    - Optional custom locations for status & pid files
+    Fully updated headless runner (March 2026)
 
-    ADAPTED (March 2026) to match the improved AgentRunner:
-    • Now correctly sets SUCCESS for casual/non-agentic chats ("hello", direct replies)
-    • Recognises the new "finish" event (with reason="casual_complete" or "task_complete")
-    • Uses real iteration number from "step_start" payload (no more off-by-one on streaming)
-    • Removed obsolete handlers ("final_answer", duplicate "tool_complete", progress_summary, etc.)
-    • Keeps 100% compatible yields/parameters with the current AgentRunner.run()
+    Features:
+    - Cooperative cancellation via stop_event
+    - Graceful shutdown (SIGINT / SIGTERM)
+    - Accurate success detection (casual + task)
+    - Clean status tracking (JSON file)
+    - PID file for external control
+    - Compatible with new AgentRunner events
     """
 
     def __init__(
         self,
         status_file: str | Path = "/tmp/agent.status.json",
         pid_file: str | Path = "/tmp/agent.pid",
-        status_update_throttle_sec: float = 1.2,
+        status_update_throttle_sec: float = 1.0,
     ):
         self.status_path = Path(status_file).resolve()
         self.pid_path = Path(pid_file).resolve()
@@ -43,9 +40,16 @@ class HeadlessAgentRunner:
         self._success = False
         self._start_time: Optional[datetime] = None
 
+        self._stop_event: Optional[asyncio.Event] = None
+
+    # ============================================================
+    # Status / PID
+    # ============================================================
+
     def _write_status(
         self,
         status: str,
+        *,
         prompt: Optional[str] = None,
         iteration: Optional[int] = None,
         last_tool: Optional[str] = None,
@@ -59,7 +63,7 @@ class HeadlessAgentRunner:
         if not force and (now_ts - self._last_status_write) < self.throttle_sec:
             return
 
-        data: dict[str, Any] = {
+        data = {
             "pid": os.getpid(),
             "status": status,
             "started_at": self._start_time.isoformat() + "Z"
@@ -95,18 +99,34 @@ class HeadlessAgentRunner:
             except Exception:
                 pass
 
+    # ============================================================
+    # Signals
+    # ============================================================
+
     def _setup_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
         def shutdown_handler(sig: Optional[int] = None):
-            print(
-                f"\n[{signal.Signals(sig).name if sig else 'Shutdown'}] Stopping agent..."
+            name = signal.Signals(sig).name if sig else "Shutdown"
+            print(f"\n[{name}] Stopping agent...")
+
+            if self._stop_event:
+                self._stop_event.set()
+
+            self._write_status(
+                "shutting_down",
+                message="Received shutdown signal",
+                force=True,
             )
-            self._write_status("shutting_down", message="Received shutdown signal")
+
             for task in asyncio.all_tasks(loop):
                 if task is not asyncio.current_task():
                     task.cancel()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, shutdown_handler, sig)
+
+    # ============================================================
+    # Main run
+    # ============================================================
 
     async def run(
         self,
@@ -124,18 +144,17 @@ class HeadlessAgentRunner:
         self._running = True
         self._success = False
         self._start_time = datetime.utcnow()
+        self._stop_event = asyncio.Event()
 
         loop = asyncio.get_running_loop()
         self._setup_signal_handlers(loop)
 
-        # PID / status file logic (unchanged)
+        # ── PID safety ─────────────────────────────────────────────
         if self.pid_path.exists():
             try:
                 old_pid = int(self.pid_path.read_text().strip())
                 os.kill(old_pid, 0)
-                print(
-                    f"PID file exists and process {old_pid} is alive → refusing to start"
-                )
+                print(f"Process {old_pid} already running → abort")
                 return False
             except OSError:
                 print("Removing stale PID file")
@@ -161,142 +180,127 @@ class HeadlessAgentRunner:
                 system_prompt=system_prompt,
                 context_manager=context_manager,
                 max_tokens=max_tokens,
+                stop_event=self._stop_event,  # ✅ CRITICAL
             ):
-                # ── CRITICAL FIX: Use real iteration from AgentRunner (not per-event counter)
+                if self._stop_event.is_set():
+                    print("\n🛑 Stop event received")
+                    break
+
+                # ── Iteration ───────────────────────────────────────
                 if event_type == "step_start":
                     current_iteration = payload.get("iteration", current_iteration)
-                    print(
-                        f"\n[{current_iteration}] Starting iteration {current_iteration}"
-                    )
+                    print(f"\n[{current_iteration}] Iteration start")
 
+                # ── Streaming text ─────────────────────────────────
                 elif event_type == "content_delta":
                     print(payload, end="", flush=True)
 
+                # ── Tool execution ─────────────────────────────────
                 elif event_type == "tool_start":
-                    print(f"\n🔧 TOOL: {payload['name']} {payload.get('args', {})}")
+                    name = payload.get("name")
+                    print(f"\n🔧 TOOL: {name} {payload.get('args', {})}")
                     self._write_status(
                         "running",
                         prompt=prompt,
                         iteration=current_iteration,
-                        last_tool=payload.get("name"),
-                        message=f"Tool started: {payload.get('name')}",
+                        last_tool=name,
+                        message=f"Tool started: {name}",
                     )
 
                 elif event_type == "tool_result":
                     name = payload.get("name", "unknown")
-                    res = str(payload.get("result", ""))
+                    result = str(payload.get("result", ""))
+
                     if payload.get("error"):
-                        print(f"\n❌ {name} failed: {res[:400]}")
+                        print(f"\n❌ {name} failed: {result[:300]}")
                         self._write_status(
                             "error",
-                            prompt=prompt,
                             iteration=current_iteration,
-                            error=res[:300],
+                            error=result[:300],
                         )
                     else:
-                        print(
-                            f"\n✅ {name} → {res[:400]}{'...' if len(res) > 400 else ''}"
-                        )
+                        print(f"\n✅ {name} → {result[:300]}")
                         self._write_status(
                             "running",
-                            prompt=prompt,
                             iteration=current_iteration,
                             last_tool=name,
-                            message=f"Tool result: {res[:150]}...",
+                            message=f"{name} completed",
                         )
+
+                elif event_type == "tool_call_delta":
+                    func = payload.get("function", {})
+                    name = func.get("name") or payload.get("name") or "unknown"
+                    print(f"\n🔧 Tool streaming: {name}")
 
                 elif event_type == "tool_calls":
                     print(f"\nCalling {len(payload)} tool(s)...")
 
-                elif event_type == "tool_call_delta":  # matches current AgentRunner
-                    # Try to get the name from full function dict, or fallback to payload fields
-                    func = payload.get("function", {})
-                    tool_name = func.get("name") or payload.get("name") or "unknown"
-
-                    # Get incremental args (delta) safely
-                    args_delta = func.get("arguments") or payload.get("arguments_delta")
-                    if isinstance(args_delta, str):
-                        # truncate long output for CLI
-                        display_args = args_delta[:60] + ("…" if len(args_delta) > 60 else "")
-                    elif isinstance(args_delta, dict):
-                        display_args = json.dumps(args_delta, indent=None)[:60] + ("…" if len(json.dumps(args_delta)) > 60 else "")
-                    else:
-                        display_args = ""
-
-                    print(f"\n🔧 Tool: {tool_name} (args delta: {display_args})")
-
+                # ── Reflection ─────────────────────────────────────
                 elif event_type == "reflection_triggered":
-                    print("\n" + "=" * 60)
-                    print("🤔 AGENT REFLECTION")
-                    print("=" * 60)
-                    print(payload.strip())
-                    print("=" * 60)
+                    print("\n🤔 Reflection:\n", payload.strip())
 
-                elif event_type == "review_phase":
-                    print("\n---\n🔍 REVIEW PHASE\n---\n")
-                    print(str(payload).strip())
-                    print("---\n")
-
+                # ── Summary ────────────────────────────────────────
                 elif event_type == "final_summary":
-                    print("\n" + "=" * 60)
-                    print("📊 EXECUTION REPORT")
-                    print("=" * 60)
-                    print(payload.strip())
-                    print("=" * 60)
+                    print("\n📊 FINAL REPORT\n", payload.strip())
 
+                # ── Finish ─────────────────────────────────────────
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
-                    print(f"\n🏁 Loop finished: {reason}")
+                    print(f"\n🏁 Finished: {reason}")
+
                     if reason in ("casual_complete", "task_complete", "normal"):
-                        self._success = True  # ← CRITICAL: casual "hello" now succeeds
+                        self._success = True
                     elif reason == "max_iterations_reached":
                         print("⚠️ Max iterations reached")
                     elif reason == "reflection_stuck":
-                        print("⚠️ Agent stuck after reflections")
+                        print("⚠️ Agent stuck")
 
-                elif event_type == "llm_finish":
-                    print("\n✅ LLM finished generating response")
+                # ── Errors / cancel ────────────────────────────────
+                elif event_type == "cancelled":
+                    print(f"\n🛑 Cancelled: {payload}")
+                    self._write_status("cancelled", message=str(payload), force=True)
+                    self._success = False
+                    break
 
-                elif event_type in ("error", "warning", "cancelled"):
-                    print(f"\n[{event_type.upper()}] {payload}")
-                    if event_type == "error":
-                        self._write_status("error", error=str(payload), force=True)
+                elif event_type == "error":
+                    print(f"\n❌ Error: {payload}")
+                    self._write_status("error", error=str(payload), force=True)
+                    self._success = False
+                    break
+
+                elif event_type == "warning":
+                    print(f"\n⚠️ Warning: {payload}")
 
                 elif event_type == "needs_confirmation":
-                    print("\n⚠️ Needs confirmation — skipping in headless mode")
-
-                # Removed obsolete handlers (final_answer, progress_summary, continuation_query_added,
-                # duplicate tool_complete) — they are no longer emitted by the current AgentRunner
+                    print("\n⚠️ Confirmation required (skipped in headless)")
 
         except asyncio.CancelledError:
-            print("\nAgent loop cancelled")
-            self._write_status("cancelled", message="Cancelled via signal", force=True)
+            print("\n🛑 Cancelled by system")
+            self._write_status("cancelled", force=True)
             self._success = False
 
         except Exception as exc:
-            print(f"\nUnexpected error: {exc}")
+            print(f"\n❌ Unexpected error: {exc}")
             self._write_status("error", error=str(exc), force=True)
             self._success = False
 
         finally:
             self._running = False
+
             if self._success:
                 self._write_status("success", force=True)
             else:
-                current = (
-                    self.status_path.read_text() if self.status_path.exists() else "{}"
-                )
                 try:
-                    data = json.loads(current)
-                    if data.get("status") not in ("success", "cancelled", "error"):
+                    current = json.loads(self.status_path.read_text())
+                    if current.get("status") not in ("error", "cancelled"):
                         self._write_status("failed", force=True)
                 except Exception:
                     self._write_status("failed", force=True)
 
             self._cleanup_files()
 
-            print("\n" + "=" * 80)
+            print("\n" + "=" * 60)
             print(f"STATUS: {'SUCCESS' if self._success else 'FAILED'}")
-            print("=" * 80)
+            print("=" * 60)
 
             return self._success

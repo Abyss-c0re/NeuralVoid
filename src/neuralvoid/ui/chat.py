@@ -88,8 +88,11 @@ class LLMChatApp(App):
     system_prompt: Optional[str]
     waiting_for_confirmation: bool = False
     pending_confirmation: Optional[dict] = None
+
     _current_stream_task: asyncio.Task | None = None
+    _current_stop_event: asyncio.Event | None = None
     _last_assistant_msg: Optional[Message] = None
+    _pending_context: list[str]
 
     # UI constants
     UPDATE_INTERVAL = 0.08
@@ -126,7 +129,7 @@ class LLMChatApp(App):
         max_iterations: Optional[int] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        tool_info_level: Optional[str] = "compact"
+        tool_info_level: Optional[str] = "compact",
     ):
         super().__init__()
 
@@ -144,6 +147,7 @@ class LLMChatApp(App):
         self.tool_info_level = tool_info_level
 
         self._spinner_idx = 0
+        self._pending_context = []
 
     def compose(self) -> ComposeResult:
         self.chat = ChatView(id="chat")
@@ -165,16 +169,57 @@ class LLMChatApp(App):
         )
         self.query_one(Input).focus()
 
+    def _start_stream(self, prompt: str) -> None:
+        """Start a brand-new agent turn with its own stop event."""
+        assistant_msg = Message("assistant", "")
+        self.chat.add(assistant_msg)
+        self._last_assistant_msg = assistant_msg
+
+        stop_event = asyncio.Event()
+        self._current_stop_event = stop_event
+
+        task = asyncio.create_task(
+            self.stream_llm(
+                prompt=prompt,
+                message=assistant_msg,
+                tools=self.tools,
+                stop_event=stop_event,
+            ),
+            name="llm-stream",
+        )
+        self._current_stream_task = task
+
+        def on_done(fut: asyncio.Task):
+            if fut is not self._current_stream_task:
+                return
+
+            self._current_stream_task = None
+            self._current_stop_event = None
+
+            if last := getattr(self, "_last_assistant_msg", None):
+                last.clear_status()
+
+            # If the user typed while the agent was working, restart now
+            if self._pending_context and not self.waiting_for_confirmation:
+                followup_prompt = "\n".join(self._pending_context).strip()
+                self._pending_context.clear()
+
+                if followup_prompt:
+                    self._start_stream(followup_prompt)
+
+        task.add_done_callback(on_done)
+
     def action_stop_stream(self) -> None:
         if self._current_stream_task is None or self._current_stream_task.done():
             self.notify("No active generation to stop.", timeout=2.5)
             return
+
+        if self._current_stop_event is not None:
+            self._current_stop_event.set()
+
         self._current_stream_task.cancel("user requested stop via Esc")
         self.notify("🛑 Generation cancelled", severity="warning", timeout=4)
 
-    # =============================================================
-    # Full confirmation handling (exactly as original)
-    # =============================================================
     async def _handle_confirmation_response(self, user_input: str) -> bool:
         if not self.waiting_for_confirmation or not self.pending_confirmation:
             return False
@@ -222,12 +267,12 @@ class LLMChatApp(App):
         self.waiting_for_confirmation = False
         self.pending_confirmation = None
 
-        # Continue in the SAME message bubble
         asyncio.create_task(
             self.stream_llm(
                 prompt="",
                 message=assistant_msg,
                 tools=self.tools,
+                stop_event=asyncio.Event(),
             )
         )
         return True
@@ -242,6 +287,7 @@ class LLMChatApp(App):
         if cmd in ("stop", "cancel"):
             self.action_stop_stream()
             return
+
         if cmd == "exit":
             self.chat.add(Message("system", "👋 Exiting..."))
             await asyncio.sleep(0.3)
@@ -251,43 +297,37 @@ class LLMChatApp(App):
         if await self._handle_confirmation_response(value):
             return
 
-        # Normal message
+        # Always show the user message immediately
         self.chat.add(Message("user", value))
         self.conversation.append({"role": "user", "content": value})
 
-        assistant_msg = Message("assistant", "")
-        self.chat.add(assistant_msg)
-        self._last_assistant_msg = assistant_msg
+        # If the agent is working, queue the text as follow-up context and restart cleanly
+        if (
+            self._current_stream_task is not None
+            and not self._current_stream_task.done()
+        ):
+            self._pending_context.append(value)
+            self.action_stop_stream()
+            return
 
-        task = asyncio.create_task(
-            self.stream_llm(value, assistant_msg, self.tools), name="llm-stream"
-        )
-        self._current_stream_task = task
+        # No active agent: start normally
+        self._start_stream(value)
 
-        def on_done(fut):
-            if fut is self._current_stream_task:
-                self._current_stream_task = None
-                if last := getattr(self, "_last_assistant_msg", None):
-                    last.clear_status()
-
-        task.add_done_callback(on_done)
-
-    # =============================================================
-    # FIXED STREAMING – tool args/markdown restored + clean status
-    # =============================================================
     async def stream_llm(
         self,
         prompt: str,
         message: Message,
         tools: Optional[ToolProvider] = None,
-        ) -> None:
+        stop_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        """Clean streaming with perfect final-answer formatting (TUI-safe)."""
         pure_assistant_text: str = ""
-        text_buffer: str = ""
+        tool_visual_buffer: str = ""
         self._last_stream_update = time.time() - 0.1
         self._spinner_idx = 0
+        stop_event = stop_event or asyncio.Event()
 
-        # Decide how detailed tool rendering should be ("off", "compact", "full")
-        level = self.tool_info_level
+        level = self.tool_info_level or "compact"
 
         runner = AgentRunner(
             client=self.client,
@@ -296,10 +336,12 @@ class LLMChatApp(App):
             max_tokens=self.max_tokens,
         )
 
-        async def _ui_update(new_buffer: str, immediate: bool = False) -> None:
-            nonlocal text_buffer
+        async def _ui_update(immediate: bool = False) -> None:
+            nonlocal pure_assistant_text, tool_visual_buffer
             now = time.time()
-            display = new_buffer.replace("[FINAL_ANSWER_COMPLETE]", "")
+            display = (pure_assistant_text + tool_visual_buffer).replace(
+                "[FINAL_ANSWER_COMPLETE]", ""
+            )
 
             if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
                 return
@@ -316,14 +358,15 @@ class LLMChatApp(App):
                 tools=tools or [],
                 system_prompt=self.system_prompt or "",
                 context_manager=self.context_manager,
+                stop_event=stop_event,
             ):
-                # ── Main content streaming ───────────────────────────────────────
+                if stop_event.is_set():
+                    return
+
                 if event_type == "content_delta":
                     pure_assistant_text += payload
-                    text_buffer += payload
-                    await _ui_update(text_buffer)
+                    await _ui_update()
 
-                # ── Tool call streaming (partial name + arguments) ───────────────
                 elif event_type == "tool_call_delta":
                     func = payload.get("function", {})
                     name = func.get("name") or payload.get("name") or "unknown"
@@ -332,7 +375,11 @@ class LLMChatApp(App):
                     if isinstance(args, str):
                         try:
                             parsed = json.loads(args)
-                            args_dict = parsed if isinstance(parsed, dict) else {"_partial": args}
+                            args_dict = (
+                                parsed
+                                if isinstance(parsed, dict)
+                                else {"_partial": args}
+                            )
                         except Exception:
                             args_dict = {"_partial": args}
                     elif isinstance(args, dict):
@@ -348,28 +395,18 @@ class LLMChatApp(App):
                         confirmation=None,
                         error=False,
                     )
-                    text_buffer += md
-                    await _ui_update(text_buffer, immediate=True)
+                    tool_visual_buffer += md
+                    await _ui_update(immediate=True)
 
                     message.update_status(
                         f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
                     )
                     self._spinner_idx += 1
 
-                # ── Tool final result ────────────────────────────────────────────
-                elif event_type == "tool_result":
-                    md = _build_tool_markdown(
-                        name=payload["name"],
-                        args=payload.get("args", {}),
-                        result=str(payload.get("result", "")),
-                        error=payload.get("error", False),
-                        level=level,
-                    )
-                    text_buffer += md
-                    await _ui_update(text_buffer, immediate=True)
-                    message.clear_status()
+                elif event_type == "tool_calls":
+                    # Optional: keep this if you want a visible marker for tool batches
+                    pass
 
-                # ── Confirmation request ─────────────────────────────────────────
                 elif event_type == "needs_confirmation":
                     md = _build_tool_markdown(
                         name=payload.get("name", "unknown"),
@@ -377,100 +414,82 @@ class LLMChatApp(App):
                         confirmation=payload.get("preview", ""),
                         level=level,
                     )
-                    text_buffer += f"\n\n{md}\n\n**Requires confirmation — type YES to approve**"
-                    await _ui_update(text_buffer, immediate=True)
-
+                    tool_visual_buffer += md
+                    await _ui_update(immediate=True)
                     message.update_status("⏳ Waiting for your confirmation")
                     self.waiting_for_confirmation = True
                     self.pending_confirmation = {**payload}
-                    return  # pause streaming
+                    return
 
-                # ── New reasoning iteration ──────────────────────────────────────
+                elif event_type in ("system", "warning", "cancelled", "error"):
+                    icon = {
+                        "system": "🖥️",
+                        "warning": "⚠️",
+                        "cancelled": "🛑",
+                        "error": "❌",
+                    }[event_type]
+                    pure_assistant_text += (
+                        f"\n\n{icon} **{event_type.capitalize()}**\n{payload}\n"
+                    )
+                    await _ui_update(immediate=True)
+                    if event_type in ("cancelled", "error"):
+                        message.clear_status()
+                        return
+
                 elif event_type == "step_start":
-                    iter_num = payload.get("iteration", "?")
                     message.update_status(
-                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} Iteration {iter_num} 🔄"
+                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} Iteration {payload.get('iteration', '?')}"
                     )
                     self._spinner_idx += 1
 
-                # ── System / warning / error / cancelled messages ────────────────
-                elif event_type == "system":
-                    text_buffer += _format_block("System", payload, "🖥️")
-                    await _ui_update(text_buffer)
+                elif event_type == "final_summary":
+                    pure_assistant_text += f"\n\n{payload}\n"
+                    await _ui_update(immediate=True)
 
-                elif event_type == "warning":
-                    text_buffer += _format_block("Warning", payload, "⚠️")
-                    await _ui_update(text_buffer)
-
-                elif event_type == "cancelled":
-                    text_buffer += _format_block(
-                        "Cancelled", payload or "user requested stop", "🛑"
-                    )
-                    await _ui_update(text_buffer, immediate=True)
-                    message.clear_status()
-                    return
-
-                elif event_type == "error":
-                    text_buffer += _format_block("Error", payload, "❌")
-                    await _ui_update(text_buffer, immediate=True)
-                    message.clear_status()
-                    return
-
-                # ── Final finish handling ────────────────────────────────────────
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
 
                     if reason == "casual_complete":
-                        final_text = pure_assistant_text.strip()
-                        if final_text:
-                            text_buffer = final_text
-                            await _ui_update(text_buffer, immediate=True)
-                            self.conversation.append(
-                                {"role": "assistant", "content": final_text}
-                            )
+                        pure_assistant_text = pure_assistant_text.strip()
                     else:
-                        # For tool-using / structured mode: keep what we built
-                        if payload.get("summary"):
-                            summary = _format_text(payload["summary"])
-                            text_buffer += _format_block(
-                                f"Finished — {reason.replace('_', ' ').title()}",
-                                summary,
-                                "🏁",
+                        if tool_visual_buffer.strip():
+                            tool_visual_buffer = (
+                                "\n\n─── 🔧 Tool usage history ───\n\n"
+                                + tool_visual_buffer
                             )
-                        else:
-                            text_buffer += _format_block("Finished", reason, "🏁")
 
-                        await _ui_update(text_buffer, immediate=True)
+                    await _ui_update(immediate=True)
 
-                        # Important: save final assistant message in ALL cases
-                        if text_buffer.strip():
-                            self.conversation.append(
-                                {"role": "assistant", "content": text_buffer.strip()}
-                            )
+                    final_content = (pure_assistant_text + tool_visual_buffer).strip()
+                    if final_content:
+                        self.conversation.append(
+                            {"role": "assistant", "content": final_content}
+                        )
 
                     message.clear_status()
-                    return   # ← usually good to exit loop here
+                    return
 
         except asyncio.CancelledError:
-            text_buffer += _format_block(
-                "Cancelled", "Agent loop stopped by user", "🛑"
-            )
-            await _ui_update(text_buffer, immediate=True)
-            message.clear_status()
+            pure_assistant_text += "\n\n🛑 **Cancelled** by user"
+            await _ui_update(immediate=True)
 
         except Exception as exc:
             logger.exception("stream_llm crashed")
-            text_buffer += _format_block("Crash", str(exc), "❌")
-            await _ui_update(text_buffer, immediate=True)
-            message.clear_status()
+            pure_assistant_text += f"\n\n❌ **Crash**\n{exc}"
+            await _ui_update(immediate=True)
 
         finally:
-            if not text_buffer.strip():
-                text_buffer = "No response generated."
-                await _ui_update(text_buffer, immediate=True)
+            if not (pure_assistant_text + tool_visual_buffer).strip():
+                pure_assistant_text = "No response generated."
+                await _ui_update(immediate=True)
             message.clear_status()
 
     async def action_clear_chat(self):
         self.chat.remove_children()
-
-
+        self.conversation.clear()
+        self._pending_context.clear()
+        self.waiting_for_confirmation = False
+        self.pending_confirmation = None
+        self._current_stream_task = None
+        self._current_stop_event = None
+        self._last_assistant_msg = None
