@@ -130,7 +130,15 @@ agents:
     tool_sets:
       - FileEditingTools
       - TerminalTools
-
+    # --- Workflow tuning --- 
+    workflow:
+        steps:
+            - llm_stream_with_tools
+            - execute_tools_if_present
+            - check_if_complete_or_casual_chat
+          #  - force_reflection_if_stuck
+          #  - decide_after_reflection
+            - safety_max_iterations
 
   # -------------------------------------------------------
   # FAST CHAT AGENT
