@@ -108,6 +108,7 @@ def main():
         max_iterations = getattr(args, "max_iterations", None) or app_cfg.get(
             "max_iterations", 10
         )
+        tool_info_level = app_cfg.get("tool_info_level", "compact")
         max_tokens = app_cfg.get("max_tokens", 12000)
         app = LLMChatApp(
             client=client,
@@ -117,6 +118,7 @@ def main():
             tool_rendering="info",
             max_iterations=max_iterations,
             max_tokens=max_tokens,
+            tool_info_level = tool_info_level
         )
         app.run()
     else:

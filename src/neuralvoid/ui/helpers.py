@@ -52,7 +52,7 @@ def _build_tool_markdown(
     parts: list[str] = []
 
     if result is None and confirmation is None:
-        if level in ("info", "full"):
+        if level in ("compact", "full"):
             parts.append(
                 f"\n\n🔧 **Calling tool:** `{name}`\n"
                 f"```json\n{json.dumps(args, indent=2)}\n```"
@@ -66,7 +66,7 @@ def _build_tool_markdown(
 
     if result is not None:
         if error:
-            if level in ("info", "full"):
+            if level in ("compact", "full"):
                 msg = error_message or result
                 parts.append(f"\n❌ **Tool `{name}` failed**\n```\n{msg}\n```")
         else:

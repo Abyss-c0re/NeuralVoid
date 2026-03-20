@@ -49,3 +49,4 @@ app:
   log_to_file: true
   log_to_ui: false
   log_file: ~/.neuralcore/neuralvoid.log
+  tool_info_level: compact

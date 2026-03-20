@@ -126,6 +126,7 @@ class LLMChatApp(App):
         max_iterations: Optional[int] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        tool_info_level: Optional[str] = "compact"
     ):
         super().__init__()
 
@@ -140,6 +141,7 @@ class LLMChatApp(App):
         self.max_iterations = max_iterations or getattr(client, "max_iterations", 20)
         self.temperature = temperature or getattr(client, "temperature", 0.7)
         self.max_tokens = max_tokens or getattr(client, "max_tokens", 32000)
+        self.tool_info_level = tool_info_level
 
         self._spinner_idx = 0
 
@@ -285,7 +287,7 @@ class LLMChatApp(App):
         self._spinner_idx = 0
 
         # Decide how detailed tool rendering should be ("off", "compact", "full")
-        level = getattr(self, "tool_rendering_level", "compact")  # ← pick a sane default
+        level = self.tool_info_level
 
         runner = AgentRunner(
             client=self.client,
