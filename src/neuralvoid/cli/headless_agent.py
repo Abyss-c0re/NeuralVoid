@@ -9,28 +9,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from neuralcore.agents.agent_core import AgentRunner
+# Replace old import with the new Agent class
+from neuralcore.agents.agent_core import Agent  # ← updated import
 
 
 class HeadlessAgentRunner:
     """
-    Fully updated headless runner (March 2026)
-
-    Features:
-    - Cooperative cancellation via stop_event
-    - Graceful shutdown (SIGINT / SIGTERM)
-    - Accurate success detection (casual + task)
-    - Clean status tracking (JSON file)
-    - PID file for external control
-    - Compatible with new AgentRunner events
+    Fully updated headless runner (March 2026) — now using the new Agent class.
+    Features preserved: cooperative cancellation, graceful shutdown, status/PID files,
+    accurate success detection, clean event handling.
     """
 
     def __init__(
         self,
+        agent: Agent,
         status_file: str | Path = "/tmp/agent.status.json",
         pid_file: str | Path = "/tmp/agent.pid",
         status_update_throttle_sec: float = 1.0,
     ):
+        self.agent = agent
         self.status_path = Path(status_file).resolve()
         self.pid_path = Path(pid_file).resolve()
         self.throttle_sec = status_update_throttle_sec
@@ -43,7 +40,7 @@ class HeadlessAgentRunner:
         self._stop_event: Optional[asyncio.Event] = None
 
     # ============================================================
-    # Status / PID
+    # Status / PID (unchanged)
     # ============================================================
 
     def _write_status(
@@ -55,6 +52,7 @@ class HeadlessAgentRunner:
         last_tool: Optional[str] = None,
         message: Optional[str] = None,
         error: Optional[str] = None,
+        phase: Optional[str] = None,
         force: bool = False,
     ) -> None:
         now = datetime.utcnow()
@@ -73,6 +71,7 @@ class HeadlessAgentRunner:
             "prompt": prompt,
             "current_iteration": iteration,
             "last_tool": last_tool,
+            "current_phase": phase,
             "message": message,
             "error": error,
         }
@@ -100,7 +99,7 @@ class HeadlessAgentRunner:
                 pass
 
     # ============================================================
-    # Signals
+    # Signals (unchanged)
     # ============================================================
 
     def _setup_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -125,17 +124,13 @@ class HeadlessAgentRunner:
             loop.add_signal_handler(sig, shutdown_handler, sig)
 
     # ============================================================
-    # Main run
+    # Main run – now uses Agent instead of AgentRunner
     # ============================================================
 
     async def run(
         self,
-        client: Any,
         prompt: str,
-        dynamic_manager: Any,
         system_prompt: str,
-        context_manager: Any,
-        max_iterations: int = 25,
         max_tokens: int = 12000,
     ) -> bool:
         if self._running:
@@ -163,85 +158,106 @@ class HeadlessAgentRunner:
         self._write_pid()
         self._write_status("starting", prompt=prompt, force=True)
 
-        runner = AgentRunner(
-            client=client,
-            max_iterations=max_iterations,
-            max_reflections=3,
-            temperature=0.3,
-            max_tokens=max_tokens,
-        )
+        # ── Create the new Agent instance ──────────────────────────
 
         current_iteration = 0
+        current_phase = "idle"
 
         try:
-            async for event_type, payload in runner.run(
+            async for event_type, payload in self.agent.run(
                 user_prompt=prompt,
-                tools=dynamic_manager,
                 system_prompt=system_prompt,
-                context_manager=context_manager,
+                temperature=0.3,
                 max_tokens=max_tokens,
-                stop_event=self._stop_event,  # ✅ CRITICAL
+                stop_event=self._stop_event,
             ):
                 if self._stop_event.is_set():
                     print("\n🛑 Stop event received")
                     break
 
-                # ── Iteration ───────────────────────────────────────
-                if event_type == "step_start":
-                    current_iteration = payload.get("iteration", current_iteration)
-                    print(f"\n[{current_iteration}] Iteration start")
+                # ── Phase tracking (new in Agent) ──────────────────
+                if event_type == "phase_changed":
+                    current_phase = payload.get("phase", current_phase)
+                    self._write_status(
+                        "running",
+                        prompt=prompt,
+                        iteration=current_iteration,
+                        phase=current_phase,
+                        message=f"Phase changed to {current_phase}",
+                    )
+                    print(f"\n→ Phase: {current_phase.upper()}")
 
-                # ── Streaming text ─────────────────────────────────
+                # ── Planning complete (new) ────────────────────────
+                elif event_type == "planning_complete":
+                    steps = payload.get("steps", [])
+                    goal = payload.get("goal", "")
+                    print(f"\n📋 Planning complete | Goal: {goal}")
+                    print("Steps:")
+                    for i, step in enumerate(steps, 1):
+                        print(f"  {i}. {step}")
+
+                # ── Iteration start ────────────────────────────────
+                elif event_type == "step_start":
+                    current_iteration = payload.get("iteration", current_iteration)
+                    print(
+                        f"\n[{current_iteration}] Iteration start (phase: {current_phase})"
+                    )
+
+                # ── Streaming content ──────────────────────────────
                 elif event_type == "content_delta":
                     print(payload, end="", flush=True)
 
-                # ── Tool execution ─────────────────────────────────
+                # ── Tool lifecycle ─────────────────────────────────
                 elif event_type == "tool_start":
-                    name = payload.get("name")
-                    print(f"\n🔧 TOOL: {name} {payload.get('args', {})}")
+                    name = payload.get("name", "unknown")
+                    args = payload.get("args", {})
+                    print(f"\n🔧 TOOL START: {name} {args}")
                     self._write_status(
                         "running",
                         prompt=prompt,
                         iteration=current_iteration,
                         last_tool=name,
+                        phase=current_phase,
                         message=f"Tool started: {name}",
                     )
 
                 elif event_type == "tool_result":
                     name = payload.get("name", "unknown")
                     result = str(payload.get("result", ""))
-
                     if payload.get("error"):
-                        print(f"\n❌ {name} failed: {result[:300]}")
+                        print(f"\n❌ {name} failed: {result[:300]}...")
                         self._write_status(
                             "error",
                             iteration=current_iteration,
+                            phase=current_phase,
                             error=result[:300],
                         )
                     else:
-                        print(f"\n✅ {name} → {result[:300]}")
+                        print(f"\n✅ {name} → {result[:300]}...")
                         self._write_status(
                             "running",
                             iteration=current_iteration,
                             last_tool=name,
+                            phase=current_phase,
                             message=f"{name} completed",
                         )
 
                 elif event_type == "tool_call_delta":
                     func = payload.get("function", {})
-                    name = func.get("name") or payload.get("name") or "unknown"
-                    print(f"\n🔧 Tool streaming: {name}")
+                    name = func.get("name") or "unknown"
+                    print(f"\n🔧 Tool delta: {name}")
 
                 elif event_type == "tool_calls":
-                    print(f"\nCalling {len(payload)} tool(s)...")
+                    count = len(payload) if isinstance(payload, list) else "?"
+                    print(f"\nCalling {count} tool(s)...")
 
                 # ── Reflection ─────────────────────────────────────
                 elif event_type == "reflection_triggered":
-                    print("\n🤔 Reflection:\n", payload.strip())
+                    print("\n🤔 Reflection:\n", str(payload).strip())
 
-                # ── Summary ────────────────────────────────────────
+                # ── Final summary ──────────────────────────────────
                 elif event_type == "final_summary":
-                    print("\n📊 FINAL REPORT\n", payload.strip())
+                    print("\n📊 FINAL REPORT\n", str(payload).strip())
 
                 # ── Finish ─────────────────────────────────────────
                 elif event_type == "finish":
@@ -253,9 +269,20 @@ class HeadlessAgentRunner:
                     elif reason == "max_iterations_reached":
                         print("⚠️ Max iterations reached")
                     elif reason == "reflection_stuck":
-                        print("⚠️ Agent stuck")
+                        print("⚠️ Agent stuck in reflection loop")
 
-                # ── Errors / cancel ────────────────────────────────
+                # ── Confirmation (headless → log only) ─────────────
+                elif event_type == "needs_confirmation":
+                    print(
+                        "\n⚠️ Confirmation required for dangerous tool (skipped in headless mode)"
+                    )
+                    self._write_status(
+                        "needs_confirmation",
+                        message="Dangerous tool requires user confirmation",
+                        force=True,
+                    )
+
+                # ── Errors / cancel / warnings ─────────────────────
                 elif event_type == "cancelled":
                     print(f"\n🛑 Cancelled: {payload}")
                     self._write_status("cancelled", message=str(payload), force=True)
@@ -270,9 +297,6 @@ class HeadlessAgentRunner:
 
                 elif event_type == "warning":
                     print(f"\n⚠️ Warning: {payload}")
-
-                elif event_type == "needs_confirmation":
-                    print("\n⚠️ Confirmation required (skipped in headless)")
 
         except asyncio.CancelledError:
             print("\n🛑 Cancelled by system")
@@ -292,7 +316,11 @@ class HeadlessAgentRunner:
             else:
                 try:
                     current = json.loads(self.status_path.read_text())
-                    if current.get("status") not in ("error", "cancelled"):
+                    if current.get("status") not in (
+                        "error",
+                        "cancelled",
+                        "shutting_down",
+                    ):
                         self._write_status("failed", force=True)
                 except Exception:
                     self._write_status("failed", force=True)

@@ -9,15 +9,15 @@ from textual.widgets import Input, Markdown
 from textual.containers import VerticalScroll
 from textual.binding import Binding
 
-from neuralcore.core.client import LLMClient
+from neuralcore.agents.agent_core import Agent
 from neuralcore.actions.actions import ActionSet
 from neuralcore.actions.manager import DynamicActionManager
+
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
 from neuralvoid.ui.helpers import _build_tool_markdown, _format_block, _format_text
 
-from neuralcore.cognition.memory import ContextManager
-from neuralcore.agents.agent_core import AgentRunner
+
 from neuralcore.utils.logger import Logger
 
 ToolProvider = Union[ActionSet, DynamicActionManager, list[dict[str, Any]]]
@@ -84,7 +84,7 @@ class ChatView(VerticalScroll):
 
 
 class LLMChatApp(App):
-    client: LLMClient
+    agent: Agent  # ← new: required by Agent
     system_prompt: Optional[str]
     waiting_for_confirmation: bool = False
     pending_confirmation: Optional[dict] = None
@@ -121,10 +121,8 @@ class LLMChatApp(App):
 
     def __init__(
         self,
-        client: LLMClient,
+        agent: Agent,
         system_prompt: Optional[str] = None,
-        tools: Optional[ToolProvider] = None,
-        context_manager: Optional[ContextManager] = None,
         tool_rendering: Optional[str] = "off",
         max_iterations: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -132,18 +130,21 @@ class LLMChatApp(App):
         tool_info_level: Optional[str] = "compact",
     ):
         super().__init__()
+        self.agent = agent
 
-        self.client = client
+        self.client = agent.client
+        self.registry = agent.registry
         self.system_prompt = system_prompt
-        self.tools = tools
-        self.context_manager = context_manager
+        self.context_manager = agent.context_manager
         self.conversation = []
 
         self.rendering = get_renderer()
         self.tool_rendering = tool_rendering
-        self.max_iterations = max_iterations or getattr(client, "max_iterations", 20)
-        self.temperature = temperature or getattr(client, "temperature", 0.7)
-        self.max_tokens = max_tokens or getattr(client, "max_tokens", 32000)
+        self.max_iterations = max_iterations or getattr(
+            agent.client, "max_iterations", 20
+        )
+        self.temperature = temperature or getattr(agent.client, "temperature", 0.7)
+        self.max_tokens = max_tokens or getattr(agent.client, "max_tokens", 32000)
         self.tool_info_level = tool_info_level
 
         self._spinner_idx = 0
@@ -182,7 +183,6 @@ class LLMChatApp(App):
             self.stream_llm(
                 prompt=prompt,
                 message=assistant_msg,
-                tools=self.tools,
                 stop_event=stop_event,
             ),
             name="llm-stream",
@@ -271,7 +271,6 @@ class LLMChatApp(App):
             self.stream_llm(
                 prompt="",
                 message=assistant_msg,
-                tools=self.tools,
                 stop_event=asyncio.Event(),
             )
         )
@@ -317,10 +316,12 @@ class LLMChatApp(App):
         self,
         prompt: str,
         message: Message,
-        tools: Optional[ToolProvider] = None,
+        tools: Optional[
+            ToolProvider
+        ] = None,  # ← kept for compatibility, but ignored in new Agent
         stop_event: Optional[asyncio.Event] = None,
     ) -> None:
-        """Clean streaming with perfect final-answer formatting (TUI-safe)."""
+        """Clean streaming with perfect final-answer formatting (TUI-safe) — now using Agent class."""
         pure_assistant_text: str = ""
         tool_visual_buffer: str = ""
         self._last_stream_update = time.time() - 0.1
@@ -329,12 +330,8 @@ class LLMChatApp(App):
 
         level = self.tool_info_level or "compact"
 
-        runner = AgentRunner(
-            client=self.client,
-            max_iterations=self.max_iterations,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        # Create the new Agent instance
+        agent = self.agent
 
         async def _ui_update(immediate: bool = False) -> None:
             nonlocal pure_assistant_text, tool_visual_buffer
@@ -353,39 +350,55 @@ class LLMChatApp(App):
                 self._last_stream_update = now
 
         try:
-            async for event_type, payload in runner.run(
+            async for event_type, payload in agent.run(
                 user_prompt=prompt,
-                tools=tools or [],
                 system_prompt=self.system_prompt or "",
-                context_manager=self.context_manager,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
                 stop_event=stop_event,
             ):
                 if stop_event.is_set():
                     return
 
-                if event_type == "content_delta":
+                # ── Phase changes (new in modern Agent) ───────────────────────
+                if event_type == "phase_changed":
+                    phase = payload.get("phase", "unknown")
+                    message.update_status(
+                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
+                    )
+                    self._spinner_idx += 1
+                    continue
+
+                # ── Planning phase (new) ─────────────────────────────────────
+                elif event_type == "planning_complete":
+                    steps = payload.get("steps", [])
+                    goal = payload.get("goal", prompt)
+                    pure_assistant_text += (
+                        f"\n**Planning complete**\nGoal: {goal}\n\n**Steps:**\n"
+                    )
+                    for i, step in enumerate(steps, 1):
+                        pure_assistant_text += f"{i}. {step}\n"
+                    pure_assistant_text += "\n"
+                    await _ui_update(immediate=True)
+                    continue
+
+                # ── Streaming assistant content ──────────────────────────────
+                elif event_type == "content_delta":
                     pure_assistant_text += payload
                     await _ui_update()
 
+                # ── Tool call delta (streaming args) ─────────────────────────
                 elif event_type == "tool_call_delta":
                     func = payload.get("function", {})
                     name = func.get("name") or payload.get("name") or "unknown"
+                    args_str = (
+                        func.get("arguments") or payload.get("arguments_delta") or ""
+                    )
 
-                    args = func.get("arguments") or payload.get("arguments_delta") or ""
-                    if isinstance(args, str):
-                        try:
-                            parsed = json.loads(args)
-                            args_dict = (
-                                parsed
-                                if isinstance(parsed, dict)
-                                else {"_partial": args}
-                            )
-                        except Exception:
-                            args_dict = {"_partial": args}
-                    elif isinstance(args, dict):
-                        args_dict = args
-                    else:
-                        args_dict = {}
+                    try:
+                        args_dict = json.loads(args_str) if args_str.strip() else {}
+                    except Exception:
+                        args_dict = {"_partial": args_str}
 
                     md = _build_tool_markdown(
                         name=name,
@@ -403,49 +416,75 @@ class LLMChatApp(App):
                     )
                     self._spinner_idx += 1
 
+                # ── Tool batch start ─────────────────────────────────────────
                 elif event_type == "tool_calls":
-                    # Optional: keep this if you want a visible marker for tool batches
-                    pass
+                    count = len(payload) if isinstance(payload, (list, tuple)) else "?"
+                    message.update_status(f"Executing {count} tool(s)...")
 
-                elif event_type == "needs_confirmation":
+                # ── Tool start (more precise than delta) ─────────────────────
+                elif event_type == "tool_start":
+                    name = payload.get("name", "unknown")
+                    args = payload.get("args", {})
                     md = _build_tool_markdown(
-                        name=payload.get("name", "unknown"),
+                        name=name,
+                        args=args,
+                        level=level,
+                        result=None,
+                        confirmation=None,
+                        error=False,
+                    )
+                    tool_visual_buffer += md
+                    await _ui_update(immediate=True)
+
+                # ── Tool result ──────────────────────────────────────────────
+                elif event_type == "tool_result":
+                    name = payload.get("name", "unknown")
+                    result = str(payload.get("result", ""))
+                    error = payload.get("error", False)
+
+                    md = _build_tool_markdown(
+                        name=name,
+                        args=payload.get("args", {}),
+                        result=result,
+                        level=level,
+                        error=error,
+                    )
+                    tool_visual_buffer += md
+                    await _ui_update(immediate=True)
+
+                    status = "❌ failed" if error else "completed"
+                    message.update_status(f"Tool **{name}** {status}")
+
+                # ── Confirmation required (dangerous tools) ──────────────────
+                elif event_type == "needs_confirmation":
+                    tool_name = payload.get("name", "unknown")
+                    md = _build_tool_markdown(
+                        name=tool_name,
                         args=payload.get("args", {}),
                         confirmation=payload.get("preview", ""),
                         level=level,
                     )
                     tool_visual_buffer += md
                     await _ui_update(immediate=True)
+
                     message.update_status("⏳ Waiting for your confirmation")
                     self.waiting_for_confirmation = True
                     self.pending_confirmation = {**payload}
-                    return
+                    return  # pause streaming until user confirms
 
-                elif event_type in ("system", "warning", "cancelled", "error"):
-                    icon = {
-                        "system": "🖥️",
-                        "warning": "⚠️",
-                        "cancelled": "🛑",
-                        "error": "❌",
-                    }[event_type]
+                # ── Reflection ───────────────────────────────────────────────
+                elif event_type == "reflection_triggered":
                     pure_assistant_text += (
-                        f"\n\n{icon} **{event_type.capitalize()}**\n{payload}\n"
+                        f"\n\n🤔 **Self-Reflection**\n{payload.strip()}\n\n"
                     )
                     await _ui_update(immediate=True)
-                    if event_type in ("cancelled", "error"):
-                        message.clear_status()
-                        return
 
-                elif event_type == "step_start":
-                    message.update_status(
-                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} Iteration {payload.get('iteration', '?')}"
-                    )
-                    self._spinner_idx += 1
-
+                # ── Final summary report ─────────────────────────────────────
                 elif event_type == "final_summary":
                     pure_assistant_text += f"\n\n{payload}\n"
                     await _ui_update(immediate=True)
 
+                # ── Finish signal ────────────────────────────────────────────
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
 
@@ -468,6 +507,20 @@ class LLMChatApp(App):
 
                     message.clear_status()
                     return
+
+                # ── Errors / cancellations / warnings ────────────────────────
+                elif event_type in ("cancelled", "error", "warning"):
+                    icon = {"cancelled": "🛑", "error": "❌", "warning": "⚠️"}.get(
+                        event_type, "⚠️"
+                    )
+                    pure_assistant_text += (
+                        f"\n\n{icon} **{event_type.capitalize()}**\n{payload}\n"
+                    )
+                    await _ui_update(immediate=True)
+
+                    if event_type in ("cancelled", "error"):
+                        message.clear_status()
+                        return
 
         except asyncio.CancelledError:
             pure_assistant_text += "\n\n🛑 **Cancelled** by user"
