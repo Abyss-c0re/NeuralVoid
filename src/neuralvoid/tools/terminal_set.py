@@ -23,20 +23,27 @@ def exec_pwd() -> str:
     return os.getcwd()
 
 
+# ---------------- CD ----------------
 @tool("TerminalTools", tags=["filesystem", "directory", "navigation"], name="cd")
-def exec_cd(path: str) -> str:
+def exec_cd(path: str, as_dict: bool = False):
     """Change current working directory."""
     try:
         os.chdir(path)
-        return f"Changed directory to: {os.getcwd()}"
+        msg = f"Changed directory to '{os.getcwd()}'"
+        return (
+            {"status": "success", "cwd": os.getcwd(), "message": msg}
+            if as_dict
+            else msg
+        )
     except FileNotFoundError:
-        return f"cd: no such file or directory: '{path}'"
+        msg = f"cd: no such file or directory: '{path}'"
     except NotADirectoryError:
-        return f"cd: not a directory: '{path}'"
+        msg = f"cd: not a directory: '{path}'"
     except PermissionError:
-        return f"cd: permission denied: '{path}'"
+        msg = f"cd: permission denied: '{path}'"
     except Exception as e:
-        return f"cd error: {str(e)}"
+        msg = f"cd error: {str(e)}"
+    return {"status": "error", "message": msg} if as_dict else msg
 
 
 # ─────────────────────────────────────────────────────────────
@@ -53,31 +60,54 @@ def exec_cat(file_path: str) -> str:
 
 
 @tool("TerminalTools", tags=["filesystem", "file", "create"], name="touch")
-def exec_touch(file_path: str) -> str:
+def exec_touch(file_path: str, as_dict: bool = False):
     """Create empty file or update timestamp."""
-    subprocess.run(["touch", file_path], check=True)
-    return f"Touched '{file_path}'"
+    try:
+        subprocess.run(["touch", file_path], check=True)
+        msg = f"Touched file '{file_path}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"touch error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool("TerminalTools", tags=["filesystem", "directory", "create"], name="mkdir")
-def exec_mkdir(path: str) -> str:
+def exec_mkdir(path: str, as_dict: bool = False):
     """Create a directory."""
-    subprocess.run(["mkdir", "-p", path], check=True)
-    return f"Directory created: '{path}'"
+    try:
+        os.makedirs(path, exist_ok=True)
+        msg = f"Created directory '{path}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"mkdir error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool("TerminalTools", tags=["filesystem", "file", "copy"], name="cp")
-def exec_cp(source: str, destination: str) -> str:
+def exec_cp(source: str, destination: str, as_dict: bool = False):
     """Copy a file or directory."""
-    subprocess.run(["cp", source, destination], check=True)
-    return f"Copied '{source}' → '{destination}'"
+    try:
+        if os.path.isdir(source):
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination)
+        msg = f"Copied '{source}' → '{destination}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"cp error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool("TerminalTools", tags=["filesystem", "file", "move"], name="mv")
-def exec_mv(source: str, destination: str) -> str:
+def exec_mv(source: str, destination: str, as_dict: bool = False):
     """Move or rename a file or directory."""
-    subprocess.run(["mv", source, destination], check=True)
-    return f"Moved '{source}' → '{destination}'"
+    try:
+        shutil.move(source, destination)
+        msg = f"Moved '{source}' → '{destination}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"mv error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool(
@@ -86,12 +116,18 @@ def exec_mv(source: str, destination: str) -> str:
     name="delete_file",
     require_confirmation=True,
 )
-def exec_delete_file(file_path: str) -> str:
+def exec_delete_file(file_path: str, as_dict: bool = False):
     """Delete a file (requires confirmation)."""
     if not os.path.isfile(file_path):
-        return f"File not found: '{file_path}'"
-    os.remove(file_path)
-    return f"Deleted file '{file_path}'"
+        msg = f"File not found: '{file_path}'"
+        return {"status": "error", "message": msg} if as_dict else msg
+    try:
+        os.remove(file_path)
+        msg = f"Deleted file '{file_path}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"delete_file error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool(
@@ -100,12 +136,18 @@ def exec_delete_file(file_path: str) -> str:
     name="delete_dir",
     require_confirmation=True,
 )
-def exec_delete_dir(dir_path: str) -> str:
+def exec_delete_dir(dir_path: str, as_dict: bool = False):
     """Delete a directory recursively (requires confirmation)."""
     if not os.path.isdir(dir_path):
-        return f"Directory not found: '{dir_path}'"
-    shutil.rmtree(dir_path)
-    return f"Deleted directory '{dir_path}'"
+        msg = f"Directory not found: '{dir_path}'"
+        return {"status": "error", "message": msg} if as_dict else msg
+    try:
+        shutil.rmtree(dir_path)
+        msg = f"Deleted directory '{dir_path}'"
+        return {"status": "success", "message": msg} if as_dict else msg
+    except Exception as e:
+        msg = f"delete_dir error: {str(e)}"
+        return {"status": "error", "message": msg} if as_dict else msg
 
 
 # ─────────────────────────────────────────────────────────────
