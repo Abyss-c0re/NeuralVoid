@@ -137,7 +137,6 @@ agents:
             - execute_if_tools
             - check_complete
             - reflect_if_stuck
-            - decide_after_reflection
             - safety_fallback
 
   # -------------------------------------------------------
