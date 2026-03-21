@@ -132,13 +132,13 @@ agents:
       - TerminalTools
     # --- Workflow tuning --- 
     workflow:
-        steps:
-            - llm_stream_with_tools
-            - execute_tools_if_present
-            - check_if_complete_or_casual_chat
-          #  - force_reflection_if_stuck
-          #  - decide_after_reflection
-            - safety_max_iterations
+          steps:
+            - llm_stream
+            - execute_if_tools
+            - check_complete
+            - reflect_if_stuck
+            - decide_after_reflection
+            - safety_fallback
 
   # -------------------------------------------------------
   # FAST CHAT AGENT
