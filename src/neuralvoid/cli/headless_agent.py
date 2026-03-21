@@ -7,10 +7,9 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-# Replace old import with the new Agent class
-from neuralcore.agents.agent_core import Agent  # ← updated import
+from neuralcore.agents.core import Agent
 
 
 class HeadlessAgentRunner:

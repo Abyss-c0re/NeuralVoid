@@ -9,7 +9,7 @@ from textual.widgets import Input, Markdown
 from textual.containers import VerticalScroll
 from textual.binding import Binding
 
-from neuralcore.agents.agent_core import Agent
+from neuralcore.agents.core import Agent
 from neuralcore.actions.actions import ActionSet
 from neuralcore.actions.manager import DynamicActionManager
 
