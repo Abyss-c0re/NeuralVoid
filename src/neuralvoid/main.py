@@ -11,7 +11,6 @@ from neuralvoid.ui.rendering import get_renderer
 from neuralcore.utils.config import get_loader
 
 from neuralcore.core.client_factory import get_clients
-from neuralcore.utils.agent_loader import load_agent_from_config
 
 from neuralcore.utils.logger import Logger
 
@@ -48,7 +47,7 @@ Default paths:
     app_root = Path(__file__).parent
 
     agent_id = args.agent or "agent_002"  # default to casual chat agent
-    agent = load_agent_from_config(agent_id, app_root, loader)
+    agent = loader.load_agent_from_config(agent_id, app_root, loader)
 
     # ── Headless mode ─────────────────────────────────────────────
     if args.deploy:
