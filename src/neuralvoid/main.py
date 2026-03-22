@@ -12,6 +12,7 @@ from neuralcore.utils.config import get_loader
 
 from neuralcore.core.client_factory import get_clients
 
+
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger(renderer=get_renderer())
@@ -29,7 +30,7 @@ def main():
         )
 
     # ───────────────────────────── CONFIG ──────────────────────────
-    loader = get_loader(cli_path=args.config)
+    loader = get_loader(cli_path=args.config, app_root=Path(__file__).parent)
 
     system_prompt = loader.get_system_prompt()
 
@@ -44,10 +45,8 @@ Default paths:
 - Inside the app folder""")
         sys.exit(1)
 
-    app_root = Path(__file__).parent
-
     agent_id = args.agent or "agent_002"  # default to casual chat agent
-    agent = loader.load_agent_from_config(agent_id, app_root, loader)
+    agent = loader.load_agent_from_config(agent_id)
 
     # ── Headless mode ─────────────────────────────────────────────
     if args.deploy:
