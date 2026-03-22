@@ -94,8 +94,13 @@ agents:
             iteration: { le: 2 }
 
         - name: llm_stream
+          overrides:
+            temperature: 0.7
+        
 
         - name: execute_if_tools
+          #overrides:
+            #toolset: CoreChatTools
           if:
             has_tools: true
 
