@@ -71,6 +71,40 @@ tools:
   TerminalTools: {} # Default internal tool file: tools/terminal_set.py
   #  external_set:
   #   folder: ~/mytools     # Optional external folder, auto-load all .py files
+  # or  file:
+
+workflows:
+  balanced_hybrid:
+    name: balanced_hybrid
+    description: "Fast chat + tools + smart enough for coding/docs"
+    # Can load from folder or file
+    steps:
+      - name: plan_tasks #using steps from default
+        if:
+          iteration: { le: 2 }
+
+      - name: llm_stream
+
+      - name: execute_if_tools
+        if:
+          has_tools: true
+
+      - name: verify_goal_completion
+        if:
+          is_complete: true
+
+      - name: check_complete
+        if:
+          is_complete: false
+
+      - name: reflect_if_stuck
+        if:
+          and:
+            - iteration: { gt: 15 }
+            - no_tools_recently: true
+            - reflection_count: { lt: 3 }
+
+      - name: safety_fallback
 
 agents:
   agent_001:
@@ -86,40 +120,8 @@ agents:
       - FileEditingTools
       - TerminalTools
     workflow:
-      name: balanced_hybrid
-      description: "Fast chat + tools + smart enough for coding/docs"
-      steps:
-        - name: plan_tasks
-          if:
-            iteration: { le: 2 }
-
-        - name: llm_stream
-          overrides:
-            temperature: 0.7
-        
-
-        - name: execute_if_tools
-          #overrides:
-            #toolset: CoreChatTools
-          if:
-            has_tools: true
-
-        - name: verify_goal_completion
-          if:
-            is_complete: true
-
-        - name: check_complete
-          if:
-            is_complete: false
-
-        - name: reflect_if_stuck
-          if:
-            and:
-              - iteration: { gt: 15 }
-              - no_tools_recently: true
-              - reflection_count: { lt: 3 }
-
-        - name: safety_fallback
+      balanced_hybrid:
+        name: balanced_hybrid
 
   agent_002:
     id: "agent_002"
@@ -135,35 +137,8 @@ agents:
       - FileEditingTools
       - TerminalTools
     workflow:
-      name: balanced_hybrid
-      description: "Fast chat + tools + smart enough for coding/docs"
-      steps:
-        - name: plan_tasks
-          if:
-            iteration: { le: 2 }
-
-        - name: llm_stream
-
-        - name: execute_if_tools
-          if:
-            has_tools: true
-
-        - name: verify_goal_completion
-          if:
-            is_complete: true
-
-        - name: check_complete
-          if:
-            is_complete: false
-
-        - name: reflect_if_stuck
-          if:
-            and:
-              - iteration: { gt: 15 }
-              - no_tools_recently: true
-              - reflection_count: { lt: 3 }
-
-        - name: safety_fallback
+      balanced_hybrid:
+        name: balanced_hybrid
 
 app:
   max_iterations: -1
