@@ -2,7 +2,7 @@ from neuralcore.actions.manager import tool
 import os
 import subprocess
 import shutil
-from inspect import signature, _empty
+
 
 # ─────────────────────────────────────────────────────────────
 # FILESYSTEM / NAVIGATION
@@ -49,26 +49,6 @@ def exec_cd(path: str, as_dict: bool = False):
 # ─────────────────────────────────────────────────────────────
 # FILE OPERATIONS
 # ─────────────────────────────────────────────────────────────
-
-
-@tool("TerminalTools", tags=["filesystem", "file", "read"], name="cat")
-def exec_cat(file_path: str) -> str:
-    """Display file contents."""
-    return subprocess.run(
-        ["cat", file_path], capture_output=True, text=True
-    ).stdout.strip()
-
-
-@tool("TerminalTools", tags=["filesystem", "file", "create"], name="touch")
-def exec_touch(file_path: str, as_dict: bool = False):
-    """Create empty file or update timestamp."""
-    try:
-        subprocess.run(["touch", file_path], check=True)
-        msg = f"Touched file '{file_path}'"
-        return {"status": "success", "message": msg} if as_dict else msg
-    except Exception as e:
-        msg = f"touch error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
 
 
 @tool("TerminalTools", tags=["filesystem", "directory", "create"], name="mkdir")
@@ -164,25 +144,6 @@ def exec_find(path: str = ".", name: str = "") -> str:
     return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
 
 
-@tool("TerminalTools", tags=["filesystem", "analysis", "text"], name="wc")
-def exec_wc(
-    file_path: str, lines: bool = True, words: bool = True, chars: bool = False
-) -> str:
-    """Count lines, words, characters in a file."""
-    flags = []
-    if lines:
-        flags.append("-l")
-    if words:
-        flags.append("-w")
-    if chars:
-        flags.append("-c")
-    if not flags:
-        flags = ["-lwc"]
-    return subprocess.run(
-        ["wc", *flags, file_path], capture_output=True, text=True
-    ).stdout.strip()
-
-
 @tool("TerminalTools", tags=["filesystem", "search", "regex"], name="grep")
 def exec_grep(
     pattern: str, file_path: str, recursive: bool = False, case_sensitive: bool = True
@@ -201,35 +162,6 @@ def exec_grep(
         return result.stdout.strip()
     else:
         return f"grep error: {result.stderr.strip() or '(exit code ' + str(result.returncode) + ')'}"
-
-
-# ─────────────────────────────────────────────────────────────
-# TEXT UTILITIES
-# ─────────────────────────────────────────────────────────────
-
-
-@tool("TerminalTools", tags=["filesystem", "text"], name="head")
-def exec_head(file_path: str, lines: int = 10) -> str:
-    """Show first N lines of a file."""
-    return subprocess.run(
-        ["head", "-n", str(lines), file_path], capture_output=True, text=True
-    ).stdout.rstrip()
-
-
-@tool("TerminalTools", tags=["filesystem", "text"], name="tail")
-def exec_tail(file_path: str, lines: int = 10) -> str:
-    """Show last N lines of a file."""
-    return subprocess.run(
-        ["tail", "-n", str(lines), file_path], capture_output=True, text=True
-    ).stdout.rstrip()
-
-
-@tool("TerminalTools", tags=["filesystem", "text"], name="awk")
-def exec_awk(file_path: str, script: str) -> str:
-    """Process file with awk script."""
-    cmd = ["awk", "-f", "-", file_path]
-    result = subprocess.run(cmd, input=script, capture_output=True, text=True)
-    return result.stdout or result.stderr
 
 
 # ─────────────────────────────────────────────────────────────
@@ -259,31 +191,3 @@ def exec_stat(path: str) -> str:
     return subprocess.run(
         ["stat", path], capture_output=True, text=True
     ).stdout.rstrip()
-
-
-@tool("TerminalTools", tags=["filesystem", "metadata"], name="file")
-def exec_file(path: str) -> str:
-    """Determine file type."""
-    return subprocess.run(["file", path], capture_output=True, text=True).stdout.strip()
-
-
-@tool("TerminalTools", tags=["filesystem", "path"], name="realpath")
-def exec_realpath(path: str) -> str:
-    """Resolve absolute path."""
-    result = subprocess.run(["realpath", path], capture_output=True, text=True)
-    return (
-        result.stdout.strip()
-        if result.returncode == 0
-        else f"realpath failed: {result.stderr.strip()}"
-    )
-
-
-@tool("TerminalTools", tags=["system", "command"], name="which")
-def exec_which(command: str) -> str:
-    """Locate command in PATH."""
-    result = subprocess.run(["which", command], capture_output=True, text=True)
-    return (
-        result.stdout.strip()
-        if result.returncode == 0
-        else f"{command} not found in PATH"
-    )
