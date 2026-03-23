@@ -40,9 +40,9 @@ def main():
 
     if not client:
         print("""Export NEURALCORE_CONFIG to config.yaml or specify --config via command line.
-Default paths:
-- $HOME/.neuralcore/config.yaml
-- Inside the app folder""")
+        Default paths:
+        - $HOME/.neuralcore/config.yaml
+        - Inside the app folder""")
         sys.exit(1)
 
     agent_id = args.agent or "agent_002"  # default to casual chat agent
