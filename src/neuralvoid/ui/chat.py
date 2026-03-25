@@ -84,15 +84,20 @@ class ChatView(VerticalScroll):
 
 
 class LLMChatApp(App):
-    agent: Agent  # ← new: required by Agent
+    agent: Agent  # ← required by new queue-based Agent
     system_prompt: Optional[str]
     waiting_for_confirmation: bool = False
     pending_confirmation: Optional[dict] = None
 
-    _current_stream_task: asyncio.Task | None = None
-    _current_stop_event: asyncio.Event | None = None
-    _last_assistant_msg: Optional[Message] = None
-    _pending_context: list[str]
+    # Persistent agent runner (one single run() that lives forever)
+    _agent_task: asyncio.Task | None = None
+    _current_assistant_msg: Optional[Message] = None
+
+    # Per-turn buffers (reset on every new assistant message)
+    _current_pure_text: str = ""
+    _current_tool_buffer: str = ""
+    _last_stream_update: float = 0.0
+    _last_finished: bool = True
 
     # UI constants
     UPDATE_INTERVAL = 0.08
@@ -148,7 +153,6 @@ class LLMChatApp(App):
         self.tool_info_level = tool_info_level
 
         self._spinner_idx = 0
-        self._pending_context = []
 
     def compose(self) -> ComposeResult:
         self.chat = ChatView(id="chat")
@@ -168,58 +172,261 @@ class LLMChatApp(App):
                 "**exit** → close app",
             )
         )
+
+        # === NEW: Start the persistent queue-based agent runner once ===
+        self._agent_task = asyncio.create_task(
+            self._run_agent_forever(), name="agent-runner"
+        )
+
         self.query_one(Input).focus()
 
-    def _start_stream(self, prompt: str) -> None:
-        """Start a brand-new agent turn with its own stop event."""
-        assistant_msg = Message("assistant", "")
-        self.chat.add(assistant_msg)
-        self._last_assistant_msg = assistant_msg
+    # In LLMChatApp class
 
-        stop_event = asyncio.Event()
-        self._current_stop_event = stop_event
+    _agent_task: asyncio.Task | None = None
+    _current_assistant_msg: Optional[Message] = None
 
-        task = asyncio.create_task(
-            self.stream_llm(
-                prompt=prompt,
-                message=assistant_msg,
-                stop_event=stop_event,
-            ),
-            name="llm-stream",
-        )
-        self._current_stream_task = task
+    async def _run_agent_forever(self):
+        """Single persistent consumer that creates a NEW assistant message for EVERY LLM turn."""
+        try:
+            async for event_type, payload in self.agent.run(
+                user_prompt=None,
+                system_prompt=self.system_prompt or "",
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                chat_mode=True
+            ):
+                # Every time we see a new "llm_stream" or "content_delta" after a finish,
+                # we start a fresh assistant bubble (important for chat loop)
+                if event_type in ("phase_changed", "content_delta", "tool_start") and (
+                    self._current_assistant_msg is None
+                    or getattr(self, "_last_finished", False)
+                ):
+                    assistant_msg = Message("assistant", "")
+                    self.chat.add(assistant_msg)
+                    self._current_assistant_msg = assistant_msg
+                    self._current_pure_text = ""
+                    self._current_tool_buffer = ""
+                    self._last_finished = False
 
-        def on_done(fut: asyncio.Task):
-            if fut is not self._current_stream_task:
-                return
+                if self._current_assistant_msg is None:
+                    continue
 
-            self._current_stream_task = None
-            self._current_stop_event = None
+                await self._process_agent_event(
+                    event_type, payload, self._current_assistant_msg
+                )
 
-            if last := getattr(self, "_last_assistant_msg", None):
-                last.clear_status()
+                if event_type == "finish":
+                    self._last_finished = True
+                    self._current_assistant_msg = None  # allow new message on next turn
 
-            # If the user typed while the agent was working, restart now
-            if self._pending_context and not self.waiting_for_confirmation:
-                followup_prompt = "\n".join(self._pending_context).strip()
-                self._pending_context.clear()
+        except asyncio.CancelledError:
+            logger.debug("Agent runner cancelled")
+        except Exception as e:
+            logger.exception("Agent runner crashed")
+            self.chat.add(Message("system", f"❌ Runner error: {e}"))
 
-                if followup_prompt:
-                    self._start_stream(followup_prompt)
-
-        task.add_done_callback(on_done)
-
-    def action_stop_stream(self) -> None:
-        if self._current_stream_task is None or self._current_stream_task.done():
-            self.notify("No active generation to stop.", timeout=2.5)
+    async def _ui_update(self, message: Message, immediate: bool = False) -> None:
+        """Shared UI refresh helper (was _ui_update inside old stream_llm)."""
+        now = time.time()
+        if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
             return
 
-        if self._current_stop_event is not None:
-            self._current_stop_event.set()
+        display = (self._current_pure_text + self._current_tool_buffer).replace(
+            "[FINAL_ANSWER_COMPLETE]", ""
+        )
 
-        self._current_stream_task.cancel("user requested stop via Esc")
-        self.notify("🛑 Generation cancelled", severity="warning", timeout=4)
+        if message.buffer != display:
+            message.buffer = display
+            message.update(message.render_markdown())
+            self.chat.scroll_end(animate=False)
+            self._last_stream_update = now
 
+    async def _process_agent_event(
+        self, event_type: str, payload: Any, message: Message
+    ) -> None:
+        """All event handling logic from the old stream_llm, now running inside the persistent runner."""
+        level = self.tool_info_level or "compact"
+
+        # ── Phase changes ───────────────────────
+        if event_type == "phase_changed":
+            phase = payload.get("phase", "unknown")
+            message.update_status(
+                f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
+            )
+            self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            return
+
+        # ── Planning phase ─────────────────────────────────────
+        elif event_type == "planning_complete":
+            steps = payload.get("steps", [])
+            goal = payload.get("goal", "")
+            self._current_pure_text += (
+                f"\n**Planning complete**\nGoal: {goal}\n\n**Steps:**\n"
+            )
+            for i, step in enumerate(steps, 1):
+                self._current_pure_text += f"{i}. {step}\n"
+            self._current_pure_text += "\n"
+            await self._ui_update(message, immediate=True)
+            return
+
+        # ── Streaming assistant content ──────────────────────────────
+        elif event_type == "content_delta":
+            self._current_pure_text += payload
+            await self._ui_update(message)
+            return
+
+        # ── Tool call delta (streaming args) ─────────────────────────
+        elif event_type == "tool_call_delta":
+            func = payload.get("function", {})
+            name = func.get("name") or payload.get("name") or "unknown"
+            args_str = func.get("arguments") or payload.get("arguments_delta") or ""
+
+            try:
+                args_dict = json.loads(args_str) if args_str.strip() else {}
+            except Exception:
+                args_dict = {"_partial": args_str}
+
+            md = _build_tool_markdown(
+                name=name,
+                args=args_dict,
+                level=level,
+                result=None,
+                confirmation=None,
+                error=False,
+            )
+            self._current_tool_buffer += md
+            await self._ui_update(message, immediate=True)
+
+            message.update_status(
+                f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
+            )
+            self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            return
+
+        # ── Tool batch start ─────────────────────────────────────────
+        elif event_type == "tool_calls":
+            count = len(payload) if isinstance(payload, (list, tuple)) else "?"
+            message.update_status(f"Executing {count} tool(s)...")
+            return
+
+        # ── Tool start ─────────────────────
+        elif event_type == "tool_start":
+            name = payload.get("name", "unknown")
+            args = payload.get("args", {})
+            md = _build_tool_markdown(
+                name=name,
+                args=args,
+                level=level,
+                result=None,
+                confirmation=None,
+                error=False,
+            )
+            self._current_tool_buffer += md
+            await self._ui_update(message, immediate=True)
+            return
+
+        # ── Tool result ──────────────────────────────────────────────
+        elif event_type == "tool_result":
+            name = payload.get("name", "unknown")
+            result = str(payload.get("result", ""))
+            error = payload.get("error", False)
+
+            md = _build_tool_markdown(
+                name=name,
+                args=payload.get("args", {}),
+                result=result,
+                level=level,
+                error=error,
+            )
+            self._current_tool_buffer += md
+            await self._ui_update(message, immediate=True)
+
+            status = "❌ failed" if error else "completed"
+            message.update_status(f"Tool **{name}** {status}")
+            return
+
+        # ── Confirmation required ──────────────────
+        elif event_type == "needs_confirmation":
+            tool_name = payload.get("name", "unknown")
+            md = _build_tool_markdown(
+                name=tool_name,
+                args=payload.get("args", {}),
+                confirmation=payload.get("preview", ""),
+                level=level,
+            )
+            self._current_tool_buffer += md
+            await self._ui_update(message, immediate=True)
+
+            message.update_status("⏳ Waiting for your confirmation")
+
+            # Attach the current UI message so _handle_confirmation_response can update it
+            self.pending_confirmation = {**payload, "assistant_msg": message}
+            self.waiting_for_confirmation = True
+            return
+
+        # ── Reflection ───────────────────────────────────────────────
+        elif event_type == "reflection_triggered":
+            self._current_pure_text += (
+                f"\n\n🤔 **Self-Reflection**\n{payload.strip()}\n\n"
+            )
+            await self._ui_update(message, immediate=True)
+            return
+
+        # ── Final summary report ─────────────────────────────────────
+        elif event_type == "final_summary":
+            self._current_pure_text += f"\n\n{payload}\n"
+            await self._ui_update(message, immediate=True)
+            return
+
+        # ── Finish signal ────────────────────────────────────────────
+        elif event_type == "finish":
+            reason = payload.get("reason", "unknown")
+
+            if reason == "casual_complete":
+                self._current_pure_text = self._current_pure_text.strip()
+            else:
+                if self._current_tool_buffer.strip():
+                    self._current_tool_buffer = (
+                        "\n\n─── 🔧 Tool usage history ───\n\n"
+                        + self._current_tool_buffer
+                    )
+
+            await self._ui_update(message, immediate=True)
+
+            final_content = (
+                self._current_pure_text + self._current_tool_buffer
+            ).strip()
+            if final_content:
+                self.conversation.append(
+                    {"role": "assistant", "content": final_content}
+                )
+
+            message.clear_status()
+
+            # Reset for next turn
+            self._current_assistant_msg = None
+            self._current_pure_text = ""
+            self._current_tool_buffer = ""
+            return
+
+        # ── Errors / cancellations / warnings ────────────────────────
+        elif event_type in ("cancelled", "error", "warning"):
+            icon = {"cancelled": "🛑", "error": "❌", "warning": "⚠️"}.get(
+                event_type, "⚠️"
+            )
+            self._current_pure_text += (
+                f"\n\n{icon} **{event_type.capitalize()}**\n{payload}\n"
+            )
+            await self._ui_update(message, immediate=True)
+
+            if event_type in ("cancelled", "error"):
+                message.clear_status()
+                self._current_assistant_msg = None
+                self._current_pure_text = ""
+                self._current_tool_buffer = ""
+            return
+
+    # ==================== CONFIRMATION (still needed for dangerous tools) ====================
     async def _handle_confirmation_response(self, user_input: str) -> bool:
         if not self.waiting_for_confirmation or not self.pending_confirmation:
             return False
@@ -232,7 +439,7 @@ class LLMChatApp(App):
         args = info["args"]
         action = info["action"]
         assistant_msg = info["assistant_msg"]
-        original_tool_calls = info["tool_calls"]
+        original_tool_calls = info.get("tool_calls", [])
 
         if approved:
             try:
@@ -247,17 +454,16 @@ class LLMChatApp(App):
         else:
             content = "User denied the action."
 
-        tool_result_msg = {
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": name,
-            "content": content,
-        }
-
-        self.conversation.append(
-            {"role": "assistant", "tool_calls": original_tool_calls}
+        # === NEW: Tell the running workflow via control instead of restarting a stream ===
+        await self.agent.post_control(
+            {
+                "event": "needs_confirmation",  # workflow recognises this as confirmation response
+                "approved": approved,
+                "content": content,
+                "tool_call_id": tool_call_id,
+                "name": name,
+            }
         )
-        self.conversation.append(tool_result_msg)
 
         feedback = f"→ Action **{name}** was {'approved' if approved else 'denied'}.\nResult: {content}"
         assistant_msg.buffer += f"\n\n{feedback}"
@@ -267,15 +473,10 @@ class LLMChatApp(App):
         self.waiting_for_confirmation = False
         self.pending_confirmation = None
 
-        asyncio.create_task(
-            self.stream_llm(
-                prompt="",
-                message=assistant_msg,
-                stop_event=asyncio.Event(),
-            )
-        )
+        # No more stream_llm restart – the persistent runner continues automatically
         return True
 
+    # ==================== USER INPUT ====================
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
         event.input.value = ""
@@ -284,7 +485,7 @@ class LLMChatApp(App):
 
         cmd = value.lower()
         if cmd in ("stop", "cancel"):
-            self.action_stop_stream()
+            await self.action_stop_stream()
             return
 
         if cmd == "exit":
@@ -300,249 +501,34 @@ class LLMChatApp(App):
         self.chat.add(Message("user", value))
         self.conversation.append({"role": "user", "content": value})
 
-        # If the agent is working, queue the text as follow-up context and restart cleanly
-        if (
-            self._current_stream_task is not None
-            and not self._current_stream_task.done()
-        ):
-            self._pending_context.append(value)
-            self.action_stop_stream()
+        # Create fresh assistant message for this turn
+        assistant_msg = Message("assistant", "")
+        self.chat.add(assistant_msg)
+
+        # Reset per-turn buffers
+        self._current_assistant_msg = assistant_msg
+        self._current_pure_text = ""
+        self._current_tool_buffer = ""
+
+        # === NEW: Communicate via queue instead of calling run() with a prompt ===
+        await self.agent.post_message(value)
+
+    # ==================== STOP / CANCEL ====================
+    async def action_stop_stream(self) -> None:
+        if self._current_assistant_msg is None:
+            self.notify("No active generation to stop.", timeout=2.5)
             return
 
-        # No active agent: start normally
-        self._start_stream(value)
+        # Tell the running workflow via control (Workflow._drain_control will pick it up)
+        await self.agent.post_control({"event": "cancelled"})
+        self.notify("🛑 Generation cancelled", severity="warning", timeout=4)
 
-    async def stream_llm(
-        self,
-        prompt: str,
-        message: Message,
-        tools: Optional[
-            ToolProvider
-        ] = None,  # ← kept for compatibility, but ignored in new Agent
-        stop_event: Optional[asyncio.Event] = None,
-    ) -> None:
-        """Clean streaming with perfect final-answer formatting (TUI-safe) — now using Agent class."""
-        pure_assistant_text: str = ""
-        tool_visual_buffer: str = ""
-        self._last_stream_update = time.time() - 0.1
-        self._spinner_idx = 0
-        stop_event = stop_event or asyncio.Event()
-
-        level = self.tool_info_level or "compact"
-
-        # Create the new Agent instance
-        agent = self.agent
-
-        async def _ui_update(immediate: bool = False) -> None:
-            nonlocal pure_assistant_text, tool_visual_buffer
-            now = time.time()
-            display = (pure_assistant_text + tool_visual_buffer).replace(
-                "[FINAL_ANSWER_COMPLETE]", ""
-            )
-
-            if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
-                return
-
-            if message.buffer != display:
-                message.buffer = display
-                message.update(message.render_markdown())
-                self.chat.scroll_end(animate=False)
-                self._last_stream_update = now
-
-        try:
-            async for event_type, payload in agent.run(
-                user_prompt=prompt,
-                system_prompt=self.system_prompt or "",
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop_event=stop_event,
-            ):
-                if stop_event.is_set():
-                    return
-
-                # ── Phase changes (new in modern Agent) ───────────────────────
-                if event_type == "phase_changed":
-                    phase = payload.get("phase", "unknown")
-                    message.update_status(
-                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
-                    )
-                    self._spinner_idx += 1
-                    continue
-
-                # ── Planning phase (new) ─────────────────────────────────────
-                elif event_type == "planning_complete":
-                    steps = payload.get("steps", [])
-                    goal = payload.get("goal", prompt)
-                    pure_assistant_text += (
-                        f"\n**Planning complete**\nGoal: {goal}\n\n**Steps:**\n"
-                    )
-                    for i, step in enumerate(steps, 1):
-                        pure_assistant_text += f"{i}. {step}\n"
-                    pure_assistant_text += "\n"
-                    await _ui_update(immediate=True)
-                    continue
-
-                # ── Streaming assistant content ──────────────────────────────
-                elif event_type == "content_delta":
-                    pure_assistant_text += payload
-                    await _ui_update()
-
-                # ── Tool call delta (streaming args) ─────────────────────────
-                elif event_type == "tool_call_delta":
-                    func = payload.get("function", {})
-                    name = func.get("name") or payload.get("name") or "unknown"
-                    args_str = (
-                        func.get("arguments") or payload.get("arguments_delta") or ""
-                    )
-
-                    try:
-                        args_dict = json.loads(args_str) if args_str.strip() else {}
-                    except Exception:
-                        args_dict = {"_partial": args_str}
-
-                    md = _build_tool_markdown(
-                        name=name,
-                        args=args_dict,
-                        level=level,
-                        result=None,
-                        confirmation=None,
-                        error=False,
-                    )
-                    tool_visual_buffer += md
-                    await _ui_update(immediate=True)
-
-                    message.update_status(
-                        f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
-                    )
-                    self._spinner_idx += 1
-
-                # ── Tool batch start ─────────────────────────────────────────
-                elif event_type == "tool_calls":
-                    count = len(payload) if isinstance(payload, (list, tuple)) else "?"
-                    message.update_status(f"Executing {count} tool(s)...")
-
-                # ── Tool start (more precise than delta) ─────────────────────
-                elif event_type == "tool_start":
-                    name = payload.get("name", "unknown")
-                    args = payload.get("args", {})
-                    md = _build_tool_markdown(
-                        name=name,
-                        args=args,
-                        level=level,
-                        result=None,
-                        confirmation=None,
-                        error=False,
-                    )
-                    tool_visual_buffer += md
-                    await _ui_update(immediate=True)
-
-                # ── Tool result ──────────────────────────────────────────────
-                elif event_type == "tool_result":
-                    name = payload.get("name", "unknown")
-                    result = str(payload.get("result", ""))
-                    error = payload.get("error", False)
-
-                    md = _build_tool_markdown(
-                        name=name,
-                        args=payload.get("args", {}),
-                        result=result,
-                        level=level,
-                        error=error,
-                    )
-                    tool_visual_buffer += md
-                    await _ui_update(immediate=True)
-
-                    status = "❌ failed" if error else "completed"
-                    message.update_status(f"Tool **{name}** {status}")
-
-                # ── Confirmation required (dangerous tools) ──────────────────
-                elif event_type == "needs_confirmation":
-                    tool_name = payload.get("name", "unknown")
-                    md = _build_tool_markdown(
-                        name=tool_name,
-                        args=payload.get("args", {}),
-                        confirmation=payload.get("preview", ""),
-                        level=level,
-                    )
-                    tool_visual_buffer += md
-                    await _ui_update(immediate=True)
-
-                    message.update_status("⏳ Waiting for your confirmation")
-                    self.waiting_for_confirmation = True
-                    self.pending_confirmation = {**payload}
-                    return  # pause streaming until user confirms
-
-                # ── Reflection ───────────────────────────────────────────────
-                elif event_type == "reflection_triggered":
-                    pure_assistant_text += (
-                        f"\n\n🤔 **Self-Reflection**\n{payload.strip()}\n\n"
-                    )
-                    await _ui_update(immediate=True)
-
-                # ── Final summary report ─────────────────────────────────────
-                elif event_type == "final_summary":
-                    pure_assistant_text += f"\n\n{payload}\n"
-                    await _ui_update(immediate=True)
-
-                # ── Finish signal ────────────────────────────────────────────
-                elif event_type == "finish":
-                    reason = payload.get("reason", "unknown")
-
-                    if reason == "casual_complete":
-                        pure_assistant_text = pure_assistant_text.strip()
-                    else:
-                        if tool_visual_buffer.strip():
-                            tool_visual_buffer = (
-                                "\n\n─── 🔧 Tool usage history ───\n\n"
-                                + tool_visual_buffer
-                            )
-
-                    await _ui_update(immediate=True)
-
-                    final_content = (pure_assistant_text + tool_visual_buffer).strip()
-                    if final_content:
-                        self.conversation.append(
-                            {"role": "assistant", "content": final_content}
-                        )
-
-                    message.clear_status()
-                    return
-
-                # ── Errors / cancellations / warnings ────────────────────────
-                elif event_type in ("cancelled", "error", "warning"):
-                    icon = {"cancelled": "🛑", "error": "❌", "warning": "⚠️"}.get(
-                        event_type, "⚠️"
-                    )
-                    pure_assistant_text += (
-                        f"\n\n{icon} **{event_type.capitalize()}**\n{payload}\n"
-                    )
-                    await _ui_update(immediate=True)
-
-                    if event_type in ("cancelled", "error"):
-                        message.clear_status()
-                        return
-
-        except asyncio.CancelledError:
-            pure_assistant_text += "\n\n🛑 **Cancelled** by user"
-            await _ui_update(immediate=True)
-
-        except Exception as exc:
-            logger.exception("stream_llm crashed")
-            pure_assistant_text += f"\n\n❌ **Crash**\n{exc}"
-            await _ui_update(immediate=True)
-
-        finally:
-            if not (pure_assistant_text + tool_visual_buffer).strip():
-                pure_assistant_text = "No response generated."
-                await _ui_update(immediate=True)
-            message.clear_status()
-
+    # ==================== CLEAR CHAT ====================
     async def action_clear_chat(self):
         self.chat.remove_children()
         self.conversation.clear()
-        self._pending_context.clear()
         self.waiting_for_confirmation = False
         self.pending_confirmation = None
-        self._current_stream_task = None
-        self._current_stop_event = None
-        self._last_assistant_msg = None
+        self._current_assistant_msg = None
+        self._current_pure_text = ""
+        self._current_tool_buffer = ""
