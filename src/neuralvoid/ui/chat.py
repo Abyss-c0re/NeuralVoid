@@ -275,6 +275,17 @@ class LLMChatApp(App):
             await self._ui_update(message)
             return
 
+
+        elif event_type == "llm_response":
+            full_reply = payload.get("full_reply", "").strip()
+            if full_reply:
+                self._current_pure_text += full_reply
+                await self._ui_update(message, immediate=True)
+
+                # Also clear any lingering status
+                message.clear_status()
+            return
+
         # ── Tool call delta (streaming args) ─────────────────────────
         elif event_type == "tool_call_delta":
             func = payload.get("function", {})
