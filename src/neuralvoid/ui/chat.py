@@ -186,20 +186,19 @@ class LLMChatApp(App):
     _current_assistant_msg: Optional[Message] = None
 
     async def _run_agent_forever(self):
-        """Single persistent consumer that creates a NEW assistant message for EVERY LLM turn."""
+        """Single persistent consumer. Creates assistant bubble ONLY when real content arrives."""
         try:
             async for event_type, payload in self.agent.run(
                 user_prompt=None,
                 system_prompt=self.system_prompt or "",
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                chat_mode=True
+                chat_mode=True,
             ):
-                # Every time we see a new "llm_stream" or "content_delta" after a finish,
-                # we start a fresh assistant bubble (important for chat loop)
-                if event_type in ("phase_changed", "content_delta", "tool_start") and (
-                    self._current_assistant_msg is None
-                    or getattr(self, "_last_finished", False)
+                # === ONLY create a new assistant bubble when we have actual text ===
+                # Do NOT create on phase_changed or tool_start
+                if event_type in ("content_delta", "llm_response") and (
+                    self._current_assistant_msg is None or self._last_finished
                 ):
                     assistant_msg = Message("assistant", "")
                     self.chat.add(assistant_msg)
@@ -244,16 +243,18 @@ class LLMChatApp(App):
     async def _process_agent_event(
         self, event_type: str, payload: Any, message: Message
     ) -> None:
-        """All event handling logic from the old stream_llm, now running inside the persistent runner."""
+        """Clean event handling for chat mode. Prevents double text from content_delta + llm_response."""
         level = self.tool_info_level or "compact"
 
         # ── Phase changes ───────────────────────
+
         if event_type == "phase_changed":
             phase = payload.get("phase", "unknown")
-            message.update_status(
-                f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
-            )
-            self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            if self._current_assistant_msg:
+                self._current_assistant_msg.update_status(
+                    f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
+                )
+                self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
             return
 
         # ── Planning phase ─────────────────────────────────────
@@ -275,15 +276,15 @@ class LLMChatApp(App):
             await self._ui_update(message)
             return
 
-
+        # ── Final LLM Response (KEY FIX: Replace deltas with clean final reply) ──
         elif event_type == "llm_response":
             full_reply = payload.get("full_reply", "").strip()
             if full_reply:
-                self._current_pure_text += full_reply
+                # Replace accumulated content_delta text with the final clean reply
+                # This prevents double text in chat mode
+                self._current_pure_text = full_reply
                 await self._ui_update(message, immediate=True)
-
-                # Also clear any lingering status
-                message.clear_status()
+                message.clear_status()  # remove spinner
             return
 
         # ── Tool call delta (streaming args) ─────────────────────────
@@ -370,7 +371,6 @@ class LLMChatApp(App):
 
             message.update_status("⏳ Waiting for your confirmation")
 
-            # Attach the current UI message so _handle_confirmation_response can update it
             self.pending_confirmation = {**payload, "assistant_msg": message}
             self.waiting_for_confirmation = True
             return
