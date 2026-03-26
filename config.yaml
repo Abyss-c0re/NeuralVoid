@@ -3,7 +3,7 @@ clients:
     type: chat
     base_url: http://localhost:1212/v1
     model: qwen3.5-9b
-    tokenizer: /home/voldemar/Dev/AI/model/tokenizer.json
+    tokenizer: /home/user/Dev/AI/model/tokenizer.json #can be HF token
     api_key_env: LLM_API_KEY
 
     # generation tuning
@@ -33,7 +33,7 @@ clients:
   reasoning:
     type: chat
     model: qwen3.5-9b
-    tokenizer: ../model/tokenizer.json
+    tokenizer: /home/user/Dev/AI/model/tokenizer.json
 
     # reasoning tuning
     presence_penalty: 1.2
@@ -60,10 +60,14 @@ clients:
         description: "Multi-turn structured reasoning conversation"
         tags: ["reasoning", "chat", "analysis"]
 
-  embeddings:
-    type: embeddings
-    model: embedding-gemma-300m
-    tokenizer: /home/voldemar/Dev/AI/model/tokenizer.json
+    # embeddings:
+    #   type: embeddings
+    #   model: embedding-gemma-300m
+    #   tokenizer: /home/user/Dev/AI/model/tokenizer.json
+
+    embeddings:
+      use_fastembed: true # ← set false to force original llama.cpp
+      fastembed_model: "BAAI/bge-small-en-v1.5"
 
 tools:
   # Just list each tool set by name
@@ -71,74 +75,116 @@ tools:
   TerminalTools: {} # Default internal tool file: tools/terminal_set.py
   #  external_set:
   #   folder: ~/mytools     # Optional external folder, auto-load all .py files
-  # or  file:
-
 workflows:
-  balanced_hybrid:
-    name: balanced_hybrid
-    description: "Fast chat + tools + smart enough for coding/docs"
-    # Can load from folder or file
+  deploy_chat:
+    name: "deploy_chat"
+    description: "Persistent natural conversation mode for Deploy Agent"
     steps:
-      - name: plan_tasks #using steps from default
-        if:
-          iteration: { le: 2 }
+      - name: deploy_chat_loop
 
+  # Orchestrator: Now a full planning + ReAct workflow (as per your example)
+  # Added clear conditions based on common agent state variables.
+
+  default:
+    name: "default"
+    description: "Orchestrator: Plans → deploys sub-agents → waits → validates"
+    steps:
+      - name: plan_tasks
+      - name: deploy_sub_agents
+      - name: wait_for_sub_agents
+      - name: verify_goal_completion
+      - name: check_complete
+      - name: reflect_if_stuck
+      - name: safety_fallback
+
+  # Sub-agent workflow: Classic ReAct loop (no top-level planning step, since planning is handled by the orchestrator/default)
+
+  sub_agent_execute:
+    name: "sub_agent_execute"
+    description: "Classic ReAct execution loop used by all sub-agents (LLM + tools + reflection)"
+    steps:
       - name: llm_stream
-
       - name: execute_if_tools
         if:
           has_tools: true
-
       - name: verify_goal_completion
         if:
           is_complete: true
-
       - name: check_complete
         if:
           is_complete: false
-
       - name: reflect_if_stuck
         if:
+          or:
+            - and:
+                - iteration: { gt: 6 }
+                - no_tools_recently: true
+            - and:
+                - iteration: { gt: 8 }
+                - reflection_count: { lt: 8 }
+            - and:
+                - iteration: { gt: 12 }
+                - no_tools_recently: true
+                - reflection_count: { lt: 10 }
+      - name: replan_if_reflected
+        if:
           and:
-            - iteration: { gt: 15 }
-            - no_tools_recently: true
-            - reflection_count: { lt: 3 }
-
+            - last_reflection_iteration: { gt: 0 }
+            - iteration: { gt: last_reflection_iteration }
       - name: safety_fallback
-
 agents:
   agent_001:
     id: "agent_001"
     name: "Headless Reasoner"
-    description: "High reasoning agent for complex tasks"
+    description: "Main orchestrator agent - plans and deploys sub-agents for complex tasks"
     client: reasoning
     max_iterations: -1
-    max_reflections: 5
-    temperature: 0.4
+    max_reflections: 6
+    temperature: 0.35
     max_tokens: 28000
+    max_sub_agents: 8 # ← NEW: limit on how many sub-agents can be spawned
     tool_sets:
       - FileEditingTools
       - TerminalTools
-    workflow:
-      balanced_hybrid:
-        name: balanced_hybrid
+    workflow: default # Uses the new orchestrator workflow
 
   agent_002:
     id: "agent_002"
     name: "Terminal Chat Agent"
-    description: "Terminal assistant"
+    description: "Terminal assistant - starts in natural chat mode"
     client: main
     max_iterations: 100
-    max_reflections: 2
+    max_reflections: 3
     temperature: 0.8
     max_tokens: 28000
-    system_prompt: "You are a helpful and efficient terminal assistant. Use provided tools if needed. Use browse_tools to obtain the best tools for the current step."
+    max_sub_agents: 5 # ← NEW: limit for this agent too
+    system_prompt: "You are a helpful and efficient terminal assistant."
     tool_sets:
       - FileEditingTools
       - TerminalTools
-    workflow:
-      balanced_hybrid:
-        name: balanced_hybrid
+    workflow: deploy_chat # ← Changed to deploy_chat as default (recommended)
+
+  sub_agent_002:
+    id: "sub_agent_002"
+    name: "Terminal Sub-Agent"
+    description: "Sub-agent spawned by Terminal Chat Agent"
+    client: main
+    is_sub_agent: true
+    max_iterations: 12
+    max_reflections: 3
+    temperature: 0.3
+    max_tokens: 18000
+    system_prompt: "You are a focused sub-agent helping the main Terminal Chat Agent."
+    tool_sets:
+      - FileEditingTools
+      - TerminalTools
+    workflow: sub_agent_execute
+
+# Optional: Global defaults / settings
+settings:
+  default_max_sub_agents: 6
+  sub_agent_temperature: 0.25
+  sub_agent_max_iterations: 15 # ← simple string, this is what you want for chat
 
 app:
   max_iterations: -1
