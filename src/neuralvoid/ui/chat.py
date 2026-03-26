@@ -186,7 +186,8 @@ class LLMChatApp(App):
     _current_assistant_msg: Optional[Message] = None
 
     async def _run_agent_forever(self):
-        """Single persistent consumer. Creates assistant bubble ONLY when real content arrives."""
+        """Single persistent consumer. Creates assistant bubble ONLY when real content arrives.
+        Properly forwards sub-task progression signals."""
         try:
             async for event_type, payload in self.agent.run(
                 user_prompt=None,
@@ -195,11 +196,13 @@ class LLMChatApp(App):
                 max_tokens=self.max_tokens,
                 chat_mode=True,
             ):
-                # === ONLY create a new assistant bubble when we have actual text ===
-                # Do NOT create on phase_changed or tool_start
-                if event_type in ("content_delta", "llm_response") and (
-                    self._current_assistant_msg is None or self._last_finished
-                ):
+                # Create a new assistant message only when we have meaningful content
+                if event_type in (
+                    "content_delta",
+                    "llm_response",
+                    "step_completed",
+                    "final_summary",
+                ) and (self._current_assistant_msg is None or self._last_finished):
                     assistant_msg = Message("assistant", "")
                     self.chat.add(assistant_msg)
                     self._current_assistant_msg = assistant_msg
@@ -214,9 +217,10 @@ class LLMChatApp(App):
                     event_type, payload, self._current_assistant_msg
                 )
 
-                if event_type == "finish":
+                # Reset for next turn when a full response finishes
+                if event_type == "finish" or event_type == "llm_response":
                     self._last_finished = True
-                    self._current_assistant_msg = None  # allow new message on next turn
+                    self._current_assistant_msg = None
 
         except asyncio.CancelledError:
             logger.debug("Agent runner cancelled")
@@ -255,6 +259,19 @@ class LLMChatApp(App):
                     f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
                 )
                 self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            return
+
+            # ── Sub-task progression (NEW — this was missing) ─────────────────────
+        elif event_type == "step_completed":
+            summary = payload.get("summary", "") or str(payload)
+            self._current_pure_text += f"\n✅ **Step completed**\n{summary}\n\n"
+            await self._ui_update(message, immediate=True)
+            return
+
+        elif event_type == "step_failed":
+            error = payload.get("error", "Unknown error")
+            self._current_pure_text += f"\n❌ **Step failed**\n{error}\n\n"
+            await self._ui_update(message, immediate=True)
             return
 
         # ── Planning phase ─────────────────────────────────────
