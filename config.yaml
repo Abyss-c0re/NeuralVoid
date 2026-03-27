@@ -3,14 +3,14 @@ clients:
     type: chat
     base_url: http://localhost:1212/v1
     model: qwen3.5-9b
-    tokenizer: /home/user/Dev/AI/model/tokenizer.json #can be HF token
+    tokenizer: /home/user/Dev/AI/model/tokenizer.json
     api_key_env: LLM_API_KEY
 
     # generation tuning
     presence_penalty: 1.5
     top_k: 20
     temperature: 0.85
-    max_tokens: 22000
+    max_tokens: 64000
 
     system_prompt: "You are a helpful and efficient terminal assistant."
 
@@ -40,7 +40,7 @@ clients:
     top_k: 30
     enable_thinking: true
     temperature: 0.4
-    max_tokens: 28000
+    max_tokens: 64000
 
     system_prompt: "You are a deep reasoning assistant. Think step by step before answering."
 
@@ -82,56 +82,31 @@ workflows:
     steps:
       - name: deploy_chat_loop
 
-  # Orchestrator: Now a full planning + ReAct workflow (as per your example)
-  # Added clear conditions based on common agent state variables.
-
+  # Orchestrator: Matches main.py exactly
   default:
     name: "default"
     description: "Orchestrator: Plans → deploys sub-agents → waits → validates"
     steps:
-      - name: plan_tasks
-      - name: deploy_sub_agents
-      - name: wait_for_sub_agents
-      - name: verify_goal_completion
-      - name: check_complete
-      - name: reflect_if_stuck
-      - name: safety_fallback
+      - name: plan_microtasks
+      - name: launch_next_subtask # <--- Must match Python code
+      - name: wait_for_subtask
+      - name: check_orchestrator_complete # <--- Matches Python code
 
-  # Sub-agent workflow: Classic ReAct loop (no top-level planning step, since planning is handled by the orchestrator/default)
 
+  # Sub-agent workflow: Classic ReAct loop
   sub_agent_execute:
     name: "sub_agent_execute"
-    description: "Classic ReAct execution loop used by all sub-agents (LLM + tools + reflection)"
+    description: "Classic ReAct execution loop used by all sub-agents"
     steps:
       - name: llm_stream
       - name: execute_if_tools
         if:
-          has_tools: true
-      - name: verify_goal_completion
+          has_tools: true # Ensure you add a handler for 'has_tools' if not implicit
+      - name: sub_agent_check_complete
         if:
           is_complete: true
-      - name: check_complete
-        if:
-          is_complete: false
-      - name: reflect_if_stuck
-        if:
-          or:
-            - and:
-                - iteration: { gt: 6 }
-                - no_tools_recently: true
-            - and:
-                - iteration: { gt: 8 }
-                - reflection_count: { lt: 8 }
-            - and:
-                - iteration: { gt: 12 }
-                - no_tools_recently: true
-                - reflection_count: { lt: 10 }
-      - name: replan_if_reflected
-        if:
-          and:
-            - last_reflection_iteration: { gt: 0 }
-            - iteration: { gt: last_reflection_iteration }
-      - name: safety_fallback
+
+
 agents:
   agent_001:
     id: "agent_001"
@@ -141,7 +116,7 @@ agents:
     max_iterations: -1
     max_reflections: 6
     temperature: 0.35
-    max_tokens: 28000
+    max_tokens: 64000
     max_sub_agents: 8 # ← NEW: limit on how many sub-agents can be spawned
     tool_sets:
       - FileEditingTools
@@ -156,7 +131,7 @@ agents:
     max_iterations: 100
     max_reflections: 3
     temperature: 0.8
-    max_tokens: 28000
+    max_tokens: 64000
     max_sub_agents: 5 # ← NEW: limit for this agent too
     system_prompt: "You are a helpful and efficient terminal assistant."
     tool_sets:
@@ -173,7 +148,7 @@ agents:
     max_iterations: 12
     max_reflections: 3
     temperature: 0.3
-    max_tokens: 18000
+    max_tokens: 64000
     system_prompt: "You are a focused sub-agent helping the main Terminal Chat Agent."
     tool_sets:
       - FileEditingTools
@@ -188,7 +163,7 @@ settings:
 
 app:
   max_iterations: -1
-  max_tokens: 32000
+  max_tokens: 64000
   logging_enabled: true
   log_level: debug
   log_to_file: true
