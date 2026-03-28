@@ -71,6 +71,7 @@ clients:
 
 tools:
   # Just list each tool set by name
+# FastAssistant: {} # Expose client's method as a tool for agent
   FileEditingTools: {}
   TerminalTools: {} # Default internal tool file: tools/terminal_set.py
   #  external_set:
@@ -83,15 +84,14 @@ workflows:
       - name: deploy_chat_loop
 
   # Orchestrator: Matches main.py exactly
-  default:
-    name: "default"
+  orchestrator:
+    name: "orchestrator"
     description: "Orchestrator: Plans → deploys sub-agents → waits → validates"
     steps:
       - name: plan_microtasks
       - name: launch_next_subtask # <--- Must match Python code
       - name: wait_for_subtask
       - name: check_orchestrator_complete # <--- Matches Python code
-
 
   # Sub-agent workflow: Classic ReAct loop
   sub_agent_execute:
@@ -103,7 +103,6 @@ workflows:
         if:
           is_complete: true
 
-
 agents:
   agent_001:
     id: "agent_001"
@@ -114,11 +113,11 @@ agents:
     max_reflections: 6
     temperature: 0.35
     max_tokens: 64000
-    max_sub_agents: 8 # ← NEW: limit on how many sub-agents can be spawned
+    max_sub_agents: 8
     tool_sets:
       - FileEditingTools
       - TerminalTools
-    workflow: default # Uses the new orchestrator workflow
+    workflow: orchestrator
 
   agent_002:
     id: "agent_002"
@@ -129,12 +128,12 @@ agents:
     max_reflections: 3
     temperature: 0.8
     max_tokens: 64000
-    max_sub_agents: 5 # ← NEW: limit for this agent too
+    max_sub_agents: 5
     system_prompt: "You are a helpful and efficient terminal assistant."
     tool_sets:
       - FileEditingTools
       - TerminalTools
-    workflow: deploy_chat # ← Changed to deploy_chat as default (recommended)
+    workflow: deploy_chat
 
   sub_agent_002:
     id: "sub_agent_002"
