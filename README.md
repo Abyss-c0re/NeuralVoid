@@ -22,6 +22,8 @@
 * **Dynamic Tools**: Load tools from `src/neuralvoid/tools/` (internal or external).
 * **Multi-Agent Deployment**: Spawn sub-agents, orchestrate complex tasks, and override agent configuration dynamically.
 * **Configurable Clients & Agents**: Different LLM clients and agents can be defined for reasoning, chat, or specialized tasks.
+* **Local-first & Flexible**: Works locally (tested with `llama.cpp`) but supports remote OpenAI clients as well.
+* **Tokenizer Configuration**: Tokenizer must be specified in `config.yaml` either as a HuggingFace tag or a path to a JSON file.
 
 Everything else (iteration limits, workflow switching, logging, etc.) is global or controlled by runtime events.
 
@@ -80,6 +82,8 @@ neuralvoid --deploy "Analyze logs and summarize issues" \
 4. **Workflow & Tools**: Agents execute tasks through **highly adjustable workflows**; steps can override clients, temperature, tokens, system prompts, toolsets, retries, timeouts, and sub-agent behaviors.
 5. **Easy Tool Creation**: New tools can be added as Python files in the `tools` folder and immediately used by agents.
 6. **Multi-Agent Orchestration**: Complex tasks are split into micro-tasks, assigned to sub-agents, and executed sequentially or in parallel.
+7. **Local-first & Remote Options**: Runs locally using `llama.cpp` but can utilize OpenAI clients for remote LLM execution.
+8. **Tokenizer Requirement**: Specify the tokenizer in `config.yaml` using either a HuggingFace model tag or a path to a JSON tokenizer file.
 
 ## Notes
 
