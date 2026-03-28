@@ -99,9 +99,6 @@ workflows:
     description: "Classic ReAct execution loop used by all sub-agents"
     steps:
       - name: llm_stream
-      - name: execute_if_tools
-        if:
-          has_tools: true # Ensure you add a handler for 'has_tools' if not implicit
       - name: sub_agent_check_complete
         if:
           is_complete: true
