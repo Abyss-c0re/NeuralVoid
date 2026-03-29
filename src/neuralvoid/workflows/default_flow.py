@@ -317,7 +317,6 @@ class AgentFlow:
     ) -> AsyncIterator[Tuple[str, Any]]:
 
         if is_chat_mode:
-            # Should never happen anymore — we use _process_user_message_with_llm in chat
             raise RuntimeError(
                 "is_chat_mode=True should not reach _llm_stream_with_tools"
             )
@@ -325,7 +324,6 @@ class AgentFlow:
         state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
-        # Normal EXECUTE mode (ReAct / default workflow)
         messages = await self.agent.context_manager.provide_context(
             query=state.current_task or "Continue",
             max_input_tokens=self.agent.max_tokens,
@@ -334,7 +332,6 @@ class AgentFlow:
             include_logs=True,
         )
 
-        # ====================== LLM STREAM + TOOL EXECUTION ======================
         async def executor_callback(name: str, args: dict):
             executor = self.agent.manager.get_executor(name, self.agent)
             if not executor:
@@ -342,126 +339,123 @@ class AgentFlow:
             maybe = executor(**args)
             return await maybe if asyncio.iscoroutine(maybe) else maybe
 
-        queue = await self.agent.client.stream_with_tools(
-            messages=messages,
-            tools=tools or self.agent.manager.get_llm_tools(),
-            temperature=self.agent.temperature,
-            max_tokens=self.agent.max_tokens,
-            tool_choice="auto",
-            executor_callback=executor_callback,
-        )
+        # ====================== MAIN STREAM LOOP WITH BROWSER RESTART SUPPORT ======================
+        while True:  # Allow restart for ToolBrowser
+            tool_browser_detected = False
+            text_buffer = ""
+            tool_results = []
 
-        text_buffer = ""
-        tool_results = []
+            queue = await self.agent.client.stream_with_tools(
+                messages=messages,  # Reuse same messages on restart
+                tools=tools or self.agent.manager.get_llm_tools(),
+                temperature=self.agent.temperature,
+                max_tokens=self.agent.max_tokens,
+                tool_choice="auto",
+                executor_callback=executor_callback,
+            )
 
-        try:
-            async for item in self.agent.client._drain_queue(queue):
-                if item is None:
-                    continue
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
+            try:
+                async for item in self.agent.client._drain_queue(queue):
+                    if item is None:
+                        continue
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
 
-                kind, payload = item
+                    kind, payload = item
 
-                if kind == "content":
-                    text_buffer += payload
-                    yield ("content_delta", payload)
+                    if kind == "content":
+                        text_buffer += payload
+                        yield ("content_delta", payload)
 
-                elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
-                    if isinstance(payload, dict):
-                        tool_name = payload.get("tool_name") or payload.get("name")
-                        result = payload.get("result") or payload.get("output")
+                    elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
+                        if isinstance(payload, dict):
+                            tool_name = payload.get("tool_name") or payload.get("name")
+                            result = payload.get("result") or payload.get("output")
 
-                        # --- ADD: store tool result in internal context ---
-                        if result:
-                            try:
-                                title = f"{tool_name} result"
+                            # === TOOLBROWSER DETECTION ===
+                            if tool_name and "BrowseTools":  # adjust name if needed
+                                tool_browser_detected = True
+                                logger.info(
+                                    f"ToolBrowser detected ({tool_name}). Restarting stream with same prompt."
+                                )
+                                # Do NOT add to context, do NOT yield final reply yet
+                                break  # break inner loop to restart
 
-                                if isinstance(result, dict):
+                            # Normal tool result handling
+                            if result:
+                                try:
+                                    # ... your existing external content storage code ...
+                                    title = f"{tool_name} result"
                                     summary = (
                                         result.get("summary")
                                         or result.get("message")
                                         or str(result)
+                                        if isinstance(result, dict)
+                                        else str(result)
                                     )
-                                    metadata = result
-                                else:
-                                    summary = str(result)
-                                    metadata = {}
+                                    await self.agent.context_manager.add_external_content(
+                                        source_type=f"task_result_{tool_name}",
+                                        content=f"[{title}] {summary}\nMetadata: {result if isinstance(result, dict) else {}}",
+                                        metadata={"task": tool_name},
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to store external content: {e}"
+                                    )
 
-                                # Internal context
-                                await self.agent.context_manager.add_external_content(
-                                    source_type=f"task_result_{tool_name}",
-                                    content=f"[{title}] {summary}\nMetadata: {metadata}",
-                                    metadata={"task": tool_name, **(metadata or {})},
-                                )
+                            if isinstance(result, str) and result.strip():
+                                tool_results.append(result.strip())
 
-                                # If sub-agent, also store in parent context
-                                if getattr(self.agent, "sub_agent", False):
-                                    parent_agent = getattr(self.agent, "parent", None)
-                                    if parent_agent:
-                                        await parent_agent.context_manager.add_external_content(
-                                            source_type=f"sub_task_result_{tool_name}",
-                                            content=f"[{title}] {summary}\nMetadata: {metadata}",
-                                            metadata={
-                                                "task": tool_name,
-                                                "origin": self.agent.agent_id,
-                                                **(metadata or {}),
-                                            },
-                                        )
+                    elif kind == "finish":
+                        break
+                    elif kind in ("error", "cancelled"):
+                        yield (kind, payload)
+                        return
 
-                            except Exception as e:
-                                logger.warning(f"Failed to store external content: {e}")
+            except asyncio.CancelledError:
+                yield ("cancelled", "Task cancelled")
+                return
+            except Exception as e:
+                logger.error(f"Stream error: {e}", exc_info=True)
+                yield ("error", str(e))
+                return
 
-                        # existing collection for reply
-                        if isinstance(result, str) and result.strip():
-                            tool_results.append(result.strip())
+            # ====================== POST-STREAM HANDLING ======================
+            if tool_browser_detected:
+                # Restart the stream (same prompt, no context pollution)
+                continue
 
-                elif kind == "finish":
-                    break
-                elif kind in ("error", "cancelled"):
-                    yield (kind, payload)
-                    return
+            # Normal completion path
+            final_reply = text_buffer.strip()
+            if not final_reply and tool_results:
+                final_reply = "\n\n".join(tool_results)
+            if not final_reply:
+                final_reply = "✅ Tool executed successfully."
 
-        except asyncio.CancelledError:
-            yield ("cancelled", "Task cancelled")
-            return
-        except Exception as e:
-            logger.error(f"Stream error: {e}", exc_info=True)
-            yield ("error", str(e))
-            return
+            yield (
+                "llm_response",
+                {
+                    "full_reply": final_reply,
+                    "tool_calls": [],
+                    "is_complete": True,
+                },
+            )
 
-        final_reply = text_buffer.strip()
-        if not final_reply and tool_results:
-            final_reply = "\n\n".join(tool_results)
-        if not final_reply:
-            final_reply = "✅ Tool executed successfully."
+            await self.agent.context_manager.add_message("assistant", final_reply)
 
-        yield (
-            "llm_response",
-            {
-                "full_reply": final_reply,
-                "tool_calls": [],
-                "is_complete": True,
-            },
-        )
-
-        # Add final reply internally
-        await self.agent.context_manager.add_message("assistant", final_reply)
-
-        # If sub-agent, also store final reply in parent as external content
-        if getattr(self.agent, "sub_agent", False):
-            parent_agent = getattr(self.agent, "parent", None)
-            if parent_agent:
-                try:
-                    await parent_agent.context_manager.add_external_content(
-                        source_type="sub_task_final_reply",
-                        content=final_reply,
-                        metadata={"origin": self.agent.agent_id},
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to store final reply in parent context: {e}"
-                    )
+            # Sub-agent parent context handling (unchanged)
+            if getattr(self.agent, "sub_agent", False):
+                parent_agent = getattr(self.agent, "parent", None)
+                if parent_agent:
+                    try:
+                        await parent_agent.context_manager.add_external_content(
+                            source_type="sub_task_final_reply",
+                            content=final_reply,
+                            metadata={"origin": self.agent.agent_id},
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to store final reply in parent: {e}")
+            break  # Exit outer loop on normal completion
 
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
@@ -470,7 +464,7 @@ class AgentFlow:
     async def _process_user_message_with_llm(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Process message in chat mode. Handle complex action switching safely."""
+        """Process message in chat mode. Supports ToolBrowser restart without polluting context."""
 
         logger.debug("=== ENTERING _process_user_message_with_llm ===")
 
@@ -489,179 +483,153 @@ class AgentFlow:
         ):
             self.agent.client._current_stop_event.clear()
 
-        queue = await self.agent.client.stream_with_tools(
-            messages=messages,
-            tools=self.agent.manager.get_action_set("DynamicCore"),
-            temperature=self.agent.temperature,
-            max_tokens=self.agent.max_tokens,
-            tool_choice="auto",
-            executor_callback=executor_callback,
-        )
+        # ====================== STREAM WITH TOOLBROWSER RESTART SUPPORT ======================
+        while True:  # Allow restart when ToolBrowser is called
+            tool_browser_detected = False
+            text_buffer = ""
+            tool_results = []
+            complex_action_called = False
+            complex_reason = ""
 
-        text_buffer = ""
-        tool_results = []
-        complex_action_called = False
-        complex_reason = ""
-
-        try:
-            async for item in self.agent.client._drain_queue(queue):
-                if item is None:
-                    continue
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-
-                kind, payload = item
-
-                if kind == "content":
-                    text_buffer += payload
-                    yield ("content_delta", payload)
-
-                elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
-                    if isinstance(payload, dict):
-                        tool_name = payload.get("tool_name") or payload.get("name")
-                        if tool_name == "RequestComplexAction":
-                            complex_action_called = True
-                            complex_reason = payload.get("args", {}).get("reason", "")
-
-                        result = payload.get("result") or payload.get("output")
-
-                        # --- Add external content for any tool result ---
-                        if result:
-                            try:
-                                title = f"{tool_name} result"
-
-                                if isinstance(result, dict):
-                                    summary = (
-                                        result.get("summary")
-                                        or result.get("message")
-                                        or str(result)
-                                    )
-                                    metadata = result
-                                else:
-                                    summary = str(result)
-                                    metadata = {}
-
-                                await self.agent.context_manager.add_external_content(
-                                    source_type=f"task_result_{tool_name}",
-                                    content=f"[{title}] {summary}\nMetadata: {metadata}",
-                                    metadata={"task": tool_name, **(metadata or {})},
-                                )
-                            except Exception as e:
-                                logger.warning(f"Failed to store external content: {e}")
-
-                        # existing behavior for streaming
-                        if isinstance(result, str) and result.strip():
-                            tool_results.append(result.strip())
-
-                elif kind == "finish":
-                    logger.debug("STREAM FINISHED")
-                    break
-
-                elif kind in ("error", "cancelled"):
-                    yield (kind, payload)
-                    return
-
-        except asyncio.CancelledError:
-            yield ("cancelled", "Task cancelled")
-            return
-        except Exception as e:
-            logger.error(f"Stream error: {e}", exc_info=True)
-            yield ("error", str(e))
-            return
-
-        final_reply = text_buffer.strip()
-
-        if complex_action_called:
-            logger.info(
-                f"[CHAT → ORCHESTRATOR] Complex task detected: {complex_reason[:100]}..."
+            queue = await self.agent.client.stream_with_tools(
+                messages=messages,  # Reuse same messages on restart
+                tools=self.agent.manager.get_action_set("DynamicCore"),
+                temperature=self.agent.temperature,
+                max_tokens=self.agent.max_tokens,
+                tool_choice="auto",
+                executor_callback=executor_callback,
             )
 
-            self.agent.task = complex_reason
-            self.agent.goal = complex_reason
-
-            # Force switch to default workflow
             try:
-                self.engine.switch_workflow("default")
-                logger.info("Successfully switched to 'default' orchestrator workflow")
+                async for item in self.agent.client._drain_queue(queue):
+                    if item is None:
+                        continue
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+
+                    kind, payload = item
+
+                    if kind == "content":
+                        text_buffer += payload
+                        yield ("content_delta", payload)
+
+                    elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
+                        if isinstance(payload, dict):
+                            tool_name = payload.get("tool_name") or payload.get("name")
+                            result = payload.get("result") or payload.get("output")
+
+                            # === TOOLBROWSER RESTART LOGIC ===
+                            if tool_name and ("BrowseTools" in tool_name):
+                                tool_browser_detected = True
+                                logger.info(
+                                    f"[ToolBrowser Restart] Detected in chat mode: {tool_name}. Restarting stream (no context added)."
+                                )
+                                break  # Restart stream with same prompt
+
+                            if tool_name == "RequestComplexAction":
+                                complex_action_called = True
+                                complex_reason = payload.get("args", {}).get(
+                                    "reason", ""
+                                )
+
+                            # Normal result handling
+                            if result:
+                                try:
+                                    title = f"{tool_name} result"
+                                    if isinstance(result, dict):
+                                        summary = (
+                                            result.get("summary")
+                                            or result.get("message")
+                                            or str(result)
+                                        )
+                                        metadata = result
+                                    else:
+                                        summary = str(result)
+                                        metadata = {}
+
+                                    await self.agent.context_manager.add_external_content(
+                                        source_type=f"task_result_{tool_name}",
+                                        content=f"[{title}] {summary}\nMetadata: {metadata}",
+                                        metadata={
+                                            "task": tool_name,
+                                            **(metadata or {}),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to store external content: {e}"
+                                    )
+
+                            if isinstance(result, str) and result.strip():
+                                tool_results.append(result.strip())
+
+                    elif kind == "finish":
+                        logger.debug("STREAM FINISHED")
+                        break
+
+                    elif kind in ("error", "cancelled"):
+                        yield (kind, payload)
+                        return
+
+            except asyncio.CancelledError:
+                yield ("cancelled", "Task cancelled")
+                return
             except Exception as e:
-                logger.warning(f"Direct switch failed: {e}. Using control fallback.")
-                await self.agent.post_control(
-                    {
-                        "event": "switch_workflow",
-                        "name": "default",
-                        "reason": complex_reason,
-                    }
+                logger.error(f"Stream error: {e}", exc_info=True)
+                yield ("error", str(e))
+                return
+
+            # If ToolBrowser was called → restart the stream without adding to context
+            if tool_browser_detected:
+                continue
+
+            # ====================== NORMAL COMPLETION PATH ======================
+            final_reply = text_buffer.strip()
+
+            if complex_action_called:
+                logger.info(
+                    f"[CHAT → ORCHESTRATOR] Complex task detected: {complex_reason[:100]}..."
                 )
 
-            final_reply = (
-                f"✅ Understood. Starting **multi-step orchestration**:\n"
-                f"**{complex_reason[:120]}{'...' if len(complex_reason) > 120 else ''}**\n\n"
-                f"Planning steps → deploying specialized sub-agents sequentially."
-            )
+                self.agent.task = complex_reason
+                self.agent.goal = complex_reason
+
+                try:
+                    self.engine.switch_workflow("default")
+                except Exception as e:
+                    logger.warning(f"Direct switch failed: {e}")
+                    await self.agent.post_control(
+                        {"event": "switch_workflow", "name": "default"}
+                    )
+
+                final_reply = (
+                    f"✅ Understood. Starting **multi-step orchestration**:\n"
+                    f"**{complex_reason[:120]}{'...' if len(complex_reason) > 120 else ''}**\n\n"
+                    f"Planning steps → deploying specialized sub-agents."
+                )
+
+                yield (
+                    "llm_response",
+                    {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+                )
+                await self.agent.context_manager.add_message("assistant", final_reply)
+                return
+
+            # Normal reply
+            if not final_reply and tool_results:
+                final_reply = "\n\n".join(tool_results)
+            elif not final_reply:
+                final_reply = "✅ Tool executed successfully."
+
+            logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
 
             yield (
                 "llm_response",
                 {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
             )
             await self.agent.context_manager.add_message("assistant", final_reply)
-            return
-
-        # Normal reply — be more cautious
-        elif not final_reply and tool_results:
-            final_reply = "\n\n".join(tool_results)
-        elif not final_reply:
-            final_reply = "✅ Tool executed successfully."
-
-        # Add a safety note if we suspect partial progress
-        if "README" in complex_reason or "main.py" in complex_reason:
-            final_reply += "\n\n(Note: This is part of a multi-step process. More steps may still be running.)"
-
-        logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
-
-        yield (
-            "llm_response",
-            {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-        )
-        await self.agent.context_manager.add_message("assistant", final_reply)
-        logger.debug("Message added to context")
-
-    async def _generate_user_friendly_summary(self, state: AgentState) -> str:
-        """Generates a natural, friendly summary that will be shown to the user
-        right before returning to chat mode."""
-
-        tool_results_str = "\n".join(
-            f"• {r['name']}: {str(r.get('result', ''))[:400]}"
-            for r in self.agent.tool_results[-12:]  # last 12 results max
-        )
-
-        prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
-
-    Task: {self.agent.task}
-    Goal: {self.agent.goal or "General deployment assistance"}
-
-    What was actually done (tool results):
-    {tool_results_str or "No tool results recorded."}
-
-    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
-    - Celebrate what was accomplished
-    - Mention any important outcomes or warnings
-    - End by saying we're back in normal chat mode and ask how else you can help
-
-    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
-    """
-
-        try:
-            summary = await self.agent.client.chat(
-                [{"role": "user", "content": prompt}], temperature=0.7
-            )
-            return summary.strip()
-        except Exception:
-            # Fallback
-            return (
-                f"✅ **Task completed successfully!**\n\n"
-                f"I have finished the deployment task: **{self.agent.task}**.\n"
-                f"We are now back in normal chat mode. How else can I help you?"
-            )
+            logger.debug("Message added to context")
+            break  # Exit restart loop
 
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
         return f"✅ Sub-task completed.\n\nKey results recorded in shared context."
