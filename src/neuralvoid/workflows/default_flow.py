@@ -631,5 +631,43 @@ class AgentFlow:
             logger.debug("Message added to context")
             break  # Exit restart loop
 
+    async def _generate_user_friendly_summary(self, state: AgentState) -> str:
+        """Generates a natural, friendly summary that will be shown to the user
+        right before returning to chat mode."""
+
+        tool_results_str = "\n".join(
+            f"• {r['name']}: {str(r.get('result', ''))[:400]}"
+            for r in self.agent.tool_results[-12:]  # last 12 results max
+        )
+
+        prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
+
+    Task: {self.agent.task}
+    Goal: {self.agent.goal or "General deployment assistance"}
+
+    What was actually done (tool results):
+    {tool_results_str or "No tool results recorded."}
+
+    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
+    - Celebrate what was accomplished
+    - Mention any important outcomes or warnings
+    - End by saying we're back in normal chat mode and ask how else you can help
+
+    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
+    """
+
+        try:
+            summary = await self.agent.client.chat(
+                [{"role": "user", "content": prompt}], temperature=0.7
+            )
+            return summary.strip()
+        except Exception:
+            # Fallback
+            return (
+                f"✅ **Task completed successfully!**\n\n"
+                f"I have finished the deployment task: **{self.agent.task}**.\n"
+                f"We are now back in normal chat mode. How else can I help you?"
+            )
+
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
         return f"✅ Sub-task completed.\n\nKey results recorded in shared context."
