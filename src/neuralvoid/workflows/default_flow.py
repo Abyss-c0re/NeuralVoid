@@ -1,7 +1,3 @@
-# Demo & Test Harness:
-# This class is currently used to demonstrate framework features and actively test/improve their performance.
-# Use this for validation and exploration; its structure may change as it is finalized for integration into the new system.
-
 import asyncio
 import json
 from enum import Enum
