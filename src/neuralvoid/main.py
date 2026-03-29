@@ -10,11 +10,12 @@ from neuralvoid.ui.rendering import get_renderer
 
 from neuralcore.utils.config import get_loader
 
-from neuralcore.core.client_factory import get_clients
+from neuralcore.clients.factory import get_clients
 from neuralvoid.workflows.default_flow import AgentFlow
 
 
 from neuralcore.utils.logger import Logger
+
 logger = Logger.get_logger(renderer=get_renderer())
 
 
@@ -47,7 +48,7 @@ def main():
 
     agent_id = args.agent or "agent_002"  # default to casual chat agent
     agent = loader.load_agent_from_config(agent_id)
-    AgentFlow(agent) # loading default workflows.
+    AgentFlow(agent)  # loading default workflows.
 
     # ── Headless mode ─────────────────────────────────────────────
     if args.deploy:
