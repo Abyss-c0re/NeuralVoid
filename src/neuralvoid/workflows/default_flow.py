@@ -1,3 +1,4 @@
+import json
 import asyncio
 
 from enum import Enum
@@ -131,8 +132,177 @@ class AgentFlow:
             yield (ev, pl)
         self.engine._log_iteration_state(iteration, state)
 
-    # ... (your other orchestrator workflows remain unchanged: _wf_plan_microtasks, etc.)
+    # ==================== NEW ORCHESTRATOR (matches your AgentState) ====================
 
+    @workflow.set("orchestrator", name="plan_microtasks")
+    async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
+        if state.planned_tasks:  # already planned
+            return
+
+        state.phase = self.Phase.PLAN
+        yield ("phase_changed", {"phase": "plan"})
+
+        prompt = f"""Break this task into 4-8 small independent micro-tasks.
+
+        TASK: {self.agent.task}
+
+        For each micro-task suggest the most relevant tools (e.g. open_file_async, write_file, grep, replace_block, etc.).
+
+        Return ONLY JSON:
+        {{
+        "microtasks": [
+            {{"description": "...", "suggested_tools": ["tool1", "tool2"]}},
+            ...
+        ]
+        }}"""
+
+        raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
+        try:
+            data = json.loads(raw)
+            state.planned_tasks = [t["description"] for t in data.get("microtasks", [])]
+            state.task_tool_assignments = {
+                i: t.get("suggested_tools", [])
+                for i, t in enumerate(data.get("microtasks", []))
+            }
+        except Exception:
+            state.planned_tasks = [self.agent.task]
+            state.task_tool_assignments = {0: []}
+
+        state.current_task_index = 0
+        state.task_id_map = {}
+        yield (
+            "info",
+            f"Planned {len(state.planned_tasks)} micro-tasks with tool hints",
+        )
+
+    @workflow.set("orchestrator", name="launch_next_subtask")
+    async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
+        """
+        Launch all remaining micro-tasks in parallel for the current task index.
+        Each micro-task is mapped to a sub-agent.
+        Ensures tasks are registered in self.agent.sub_tasks before continuing.
+        """
+        if state.current_task_index >= len(state.planned_tasks):
+            state.is_complete = True
+            return
+
+        tasks_to_launch = list(
+            enumerate(
+                state.planned_tasks[state.current_task_index :],
+                start=state.current_task_index,
+            )
+        )
+
+        launched_ids = []
+
+        for idx, task_desc in tasks_to_launch:
+            assigned_tools = state.task_tool_assignments.get(idx, [])
+            name = f"Step {idx + 1}/{len(state.planned_tasks)}: {task_desc[:55]}..."
+
+            task_id = await self.agent.start_complex_deployment(
+                task_description=task_desc,
+                user_facing_name=name,
+                assigned_tools=assigned_tools or None,
+                temperature=0.25,
+                custom_system_prompt=self._build_sub_agent_system_prompt(
+                    task_desc, assigned_tools
+                ),
+            )
+
+            # Wait for the task to appear in sub_tasks
+            wait_time = 0.0
+            while task_id not in self.agent.sub_tasks and wait_time < 5.0:
+                await asyncio.sleep(0.05)
+                wait_time += 0.05
+
+            if task_id not in self.agent.sub_tasks:
+                logger.warning(f"Task {task_id} not registered in sub_tasks after 5s.")
+
+            # Register in orchestrator state
+            launched_ids.append(task_id)
+            state.task_id_map[idx] = task_id
+
+            # Update step number safely
+            if task_id in self.agent.sub_tasks:
+                self.agent.sub_tasks[task_id]["step_number"] = idx + 1
+
+            yield (
+                "sub_agent_launched",
+                {
+                    "step": idx + 1,
+                    "task_id": task_id,
+                    "description": task_desc,
+                    "assigned_tools": assigned_tools,
+                },
+            )
+            logger.info(
+                f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
+            )
+
+        state.sub_task_ids = launched_ids
+        state.current_task_index = len(state.planned_tasks)
+
+    @workflow.set("orchestrator", name="wait_for_subtask")
+    async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
+        """
+        Wait for all currently launched sub-tasks in state.sub_task_ids to complete.
+        Handles multiple sub-tasks running in parallel.
+        """
+        if not state.sub_task_ids:
+            return
+
+        pending_tasks = set(state.sub_task_ids)
+
+        while pending_tasks:
+            for task_id in list(pending_tasks):
+                task = self.agent.sub_tasks.get(task_id)
+                if task and task.get("status") in ("completed", "failed", "cancelled"):
+                    yield (
+                        "subtask_done",
+                        {"task_id": task_id, "status": task.get("status")},
+                    )
+                    pending_tasks.remove(task_id)
+                else:
+                    yield ("waiting_for_subtask", {"task_id": task_id})
+            await asyncio.sleep(0.1)
+
+        # Once all sub-tasks are done, clear the sub_task_ids list
+        state.sub_task_ids = []
+
+        # Current task index can now advance to the end of the batch
+        state.current_task_index = len(state.planned_tasks)
+
+    @workflow.set("orchestrator", name="check_orchestrator_complete")
+    async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
+        if state.current_task_index < len(state.planned_tasks):
+            state.is_complete = False
+            return
+
+        # All done
+        state.phase = self.Phase.FINALIZE
+        yield ("phase_changed", {"phase": "finalize"})
+
+        summary = await self._generate_user_friendly_summary(state)
+        yield ("llm_response", {"full_reply": summary, "is_complete": True})
+        await self.agent.context_manager.add_message("assistant", summary)
+
+        await self.agent.post_control(
+            {"event": "switch_workflow", "name": "deploy_chat"}
+        )
+
+        yield (
+            "finish",
+            {
+                "reason": "orchestrator_complete",
+                "total_steps": len(state.planned_tasks),
+            },
+        )
+
+    @workflow.set(
+        "sub_agent_execute",
+        name="llm_stream",
+        description="Streams LLM response and extracts tool calls.",
+    )
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
