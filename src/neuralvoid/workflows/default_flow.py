@@ -113,7 +113,7 @@ class AgentFlow:
                 query=content, chat=True, system_prompt=self._build_chat_system_prompt()
             )
 
-            async for ev, pl in self._process_user_message_with_llm(messages, state):
+            async for ev, pl in self._chat_loop(messages, state):
                 yield ev, pl
 
             self.agent.message_queue.task_done()
@@ -290,9 +290,7 @@ class AgentFlow:
         description="Streams LLM response and extracts tool calls.",
     )
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
-        async for ev, pl in self._llm_stream_with_tools(
-            iteration, state
-        ):  # ← now self.
+        async for ev, pl in self._agentic_loop(iteration, state):  # ← now self.
             if ev == "llm_response" and isinstance(pl, dict):
                 state.full_reply = pl.get("full_reply", "")
                 state.tool_calls = pl.get("tool_calls", [])
@@ -304,7 +302,7 @@ class AgentFlow:
     # EXECUTORS — NOW INSIDE AgentFlow (relocated)
     # ===================================================================
 
-    async def _llm_stream_with_tools(
+    async def _agentic_loop(
         self,
         iteration: int,
         state: AgentState,
@@ -313,9 +311,7 @@ class AgentFlow:
     ) -> AsyncIterator[Tuple[str, Any]]:
 
         if is_chat_mode:
-            raise RuntimeError(
-                "is_chat_mode=True should not reach _llm_stream_with_tools"
-            )
+            raise RuntimeError("is_chat_mode=True should not reach _agentic_loop")
 
         state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
@@ -457,13 +453,13 @@ class AgentFlow:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
 
-    async def _process_user_message_with_llm(
+    async def _chat_loop(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Robust chat loop with proper conversation memory.
         Fixes forgetting context between turns (especially 'it', 'this file', etc.).
         """
-        logger.debug("=== ENTERING _process_user_message_with_llm ===")
+        logger.debug("=== ENTERING _chat_loop ===")
 
         async def executor_callback(name: str, args: dict):
             executor = self.agent.manager.get_executor(name, self.agent)
@@ -586,7 +582,6 @@ class AgentFlow:
                 continue
 
             if complex_action_called:
-                # ... your existing complex action handling ...
                 self.agent.task = complex_reason
                 self.agent.goal = complex_reason
                 final_reply = f"✅ Starting multi-step orchestration for: **{complex_reason[:120]}**..."
