@@ -27,10 +27,10 @@ class AgentFlow:
     def __init__(self, agent):
         self.agent = agent
         self.engine = agent.workflow
-        workflow.bind_to_engine(self.engine, instance=self)
 
         # Extract all executor logic
         self.executors = AgentExecutors(agent, self.Phase)
+        workflow.bind_to_engine(self.engine, instance=self)
 
     # ==================== SYSTEM PROMPTS ====================
 
@@ -98,9 +98,30 @@ class AgentFlow:
                         f"[STEP {ev.replace('sub_task_', '').upper()}] {raw_msg.get('task_id')}"
                     )
                 elif ev == "switch_workflow":
-                    self.engine.switch_workflow(raw_msg.get("name", "deploy_chat"))
-                self.agent.message_queue.task_done()
-                continue
+                    name = raw_msg.get("name")
+
+                    # Robust extraction - handle both string and the buggy dict case
+                    if isinstance(name, dict):
+                        # This happens when someone accidentally posts a whole workflow config dict
+                        if "name" in name:
+                            name = name.get("name")  # nested "name"
+                        else:
+                            # fallback: take first key if it's a workflow dict
+                            name = next(iter(name.keys()), "deploy_chat")
+
+                    if not isinstance(name, str):
+                        name = "deploy_chat"  # safe default
+
+                    logger.info(f"Switching workflow to: {name}")
+                    try:
+                        self.engine.switch_workflow(name)
+                    except Exception as e:
+                        logger.error(
+                            f"Workflow switch failed for '{name}': {e}", exc_info=True
+                        )
+
+                    self.agent.message_queue.task_done()
+                    continue
 
             content = (
                 raw_msg.get("content", "")
@@ -266,7 +287,6 @@ class AgentFlow:
                     yield ("waiting_for_subtask", {"task_id": task_id})
             await asyncio.sleep(0.1)
 
-        # Once all sub-tasks are done, clear the sub_task_ids list
         state.sub_task_ids = []
 
         # Current task index can now advance to the end of the batch
@@ -298,11 +318,6 @@ class AgentFlow:
             },
         )
 
-    @workflow.set(
-        "sub_agent_execute",
-        name="llm_stream",
-        description="Streams LLM response and extracts tool calls.",
-    )
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
