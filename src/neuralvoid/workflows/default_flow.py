@@ -457,11 +457,14 @@ class AgentFlow:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
 
+    import json  # make sure this is imported at the top
+
     async def _process_user_message_with_llm(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Process message in chat mode. Supports ToolBrowser restart without polluting context."""
-
+        """Process user message in chat mode - safe version.
+        Prevents null values in tool messages that crash the backend with type_error.302.
+        """
         logger.debug("=== ENTERING _process_user_message_with_llm ===")
 
         async def executor_callback(name: str, args: dict):
@@ -470,8 +473,7 @@ class AgentFlow:
             if not executor:
                 raise RuntimeError(f"No executor for tool '{name}'")
             maybe = executor(**args)
-            result = await maybe if asyncio.iscoroutine(maybe) else maybe
-            return result
+            return await maybe if asyncio.iscoroutine(maybe) else maybe
 
         if (
             hasattr(self.agent.client, "_current_stop_event")
@@ -479,16 +481,28 @@ class AgentFlow:
         ):
             self.agent.client._current_stop_event.clear()
 
-        # ====================== STREAM WITH TOOLBROWSER RESTART SUPPORT ======================
-        while True:  # Allow restart when ToolBrowser is called
+        max_tool_loops = 10
+        loop_count = 0
+
+        while loop_count < max_tool_loops:
+            loop_count += 1
             tool_browser_detected = False
-            text_buffer = ""
-            tool_results = []
             complex_action_called = False
             complex_reason = ""
+            text_buffer: str = ""
+            tool_results: List[str] = []
+
+            # Defensive: remove any message with null content
+            messages = [
+                m for m in messages 
+                if m.get("content") is not None and m.get("content") != "null"
+            ]
+
+            # Debug: log what we're sending (uncomment if still crashing)
+            # logger.info(f"Sending {len(messages)} messages | Last role: {messages[-1].get('role') if messages else 'none'}")
 
             queue = await self.agent.client.stream_with_tools(
-                messages=messages,  # Reuse same messages on restart
+                messages=messages,
                 tools=self.agent.manager.get_action_set("DynamicCore"),
                 temperature=self.agent.temperature,
                 max_tokens=self.agent.max_tokens,
@@ -506,61 +520,66 @@ class AgentFlow:
                     kind, payload = item
 
                     if kind == "content":
-                        text_buffer += payload
-                        yield ("content_delta", payload)
+                        content = str(payload) if payload is not None else ""
+                        text_buffer += content
+                        yield ("content_delta", content)
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = payload.get("tool_name") or payload.get("name")
+                            tool_name: str = payload.get("tool_name") or payload.get("name") or "unknown"
                             result = payload.get("result") or payload.get("output")
+                            tool_call_id = payload.get("tool_call_id")
 
-                            # === TOOLBROWSER RESTART LOGIC ===
-                            if tool_name and ("BrowseTools" in tool_name):
+                            # === BROWSETOOLS SPECIAL RESTART (most common crash source) ===
+                            if "BrowseTools" in tool_name:
                                 tool_browser_detected = True
-                                logger.info(
-                                    f"[ToolBrowser Restart] Detected in chat mode: {tool_name}. Restarting stream (no context added)."
-                                )
-                                break  # Restart stream with same prompt
+                                logger.info(f"[BrowseTools Restart] Detected. Restarting stream without adding potentially bad result.")
+                                break
 
+                            # === COMPLEX ACTION ===
                             if tool_name == "RequestComplexAction":
                                 complex_action_called = True
-                                complex_reason = payload.get("args", {}).get(
-                                    "reason", ""
-                                )
+                                complex_reason = str(payload.get("args", {}).get("reason", ""))
+                                break
 
-                            # Normal result handling
-                            if result:
+                            # === SAFE TOOL RESULT HANDLING ===
+                            if result is None:
+                                content_str = f"Tool '{tool_name}' returned no output."
+                                logger.warning(f"Tool {tool_name} returned None → using safe placeholder")
+                            else:
                                 try:
-                                    title = f"{tool_name} result"
                                     if isinstance(result, dict):
-                                        summary = (
-                                            result.get("summary")
-                                            or result.get("message")
-                                            or str(result)
-                                        )
-                                        metadata = result
+                                        content_str = json.dumps(result, ensure_ascii=False, default=str)
+                                    elif isinstance(result, (list, tuple)):
+                                        content_str = json.dumps(result, ensure_ascii=False, default=str)
                                     else:
-                                        summary = str(result)
-                                        metadata = {}
+                                        content_str = str(result)
+                                except Exception:
+                                    content_str = str(result) if result is not None else "Tool returned no output."
 
-                                    await self.agent.context_manager.add_external_content(
-                                        source_type=f"task_result_{tool_name}",
-                                        content=f"[{title}] {summary}\nMetadata: {metadata}",
-                                        metadata={
-                                            "task": tool_name,
-                                            **(metadata or {}),
-                                        },
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Failed to store external content: {e}"
-                                    )
+                            # Always add external content safely
+                            try:
+                                summary = content_str[:400]
+                                await self.agent.context_manager.add_external_content(
+                                    source_type=f"task_result_{tool_name}",
+                                    content=f"[{tool_name}] {summary}",
+                                    metadata={"task": tool_name},
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to store external content for {tool_name}: {e}")
 
-                            if isinstance(result, str) and result.strip():
-                                tool_results.append(result.strip())
+                            # Append tool message - content is ALWAYS string
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id or f"call_{len(messages)}",
+                                "name": tool_name,
+                                "content": content_str,   # guaranteed string
+                            })
+
+                            if content_str.strip():
+                                tool_results.append(content_str.strip())
 
                     elif kind == "finish":
-                        logger.debug("STREAM FINISHED")
                         break
 
                     elif kind in ("error", "cancelled"):
@@ -575,57 +594,45 @@ class AgentFlow:
                 yield ("error", str(e))
                 return
 
-            # If ToolBrowser was called → restart the stream without adding to context
+            # ====================== AFTER STREAM ======================
             if tool_browser_detected:
-                continue
-
-            # ====================== NORMAL COMPLETION PATH ======================
-            final_reply = text_buffer.strip()
+                continue  # restart for BrowseTools
 
             if complex_action_called:
-                logger.info(
-                    f"[CHAT → ORCHESTRATOR] Complex task detected: {complex_reason[:100]}..."
-                )
-
+                logger.info(f"[CHAT → ORCHESTRATOR] Complex task detected.")
                 self.agent.task = complex_reason
                 self.agent.goal = complex_reason
 
-                try:
-                    self.engine.switch_workflow("default")
-                except Exception as e:
-                    logger.warning(f"Direct switch failed: {e}")
-                    await self.agent.post_control(
-                        {"event": "switch_workflow", "name": "default"}
-                    )
-
-                final_reply = (
-                    f"✅ Understood. Starting **multi-step orchestration**:\n"
-                    f"**{complex_reason[:120]}{'...' if len(complex_reason) > 120 else ''}**\n\n"
-                    f"Planning steps → deploying specialized sub-agents."
-                )
-
-                yield (
-                    "llm_response",
-                    {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-                )
+                final_reply = f"✅ Understood. Starting multi-step orchestration for: **{complex_reason[:120]}**..."
+                yield ("llm_response", {"full_reply": final_reply, "tool_calls": [], "is_complete": True})
                 await self.agent.context_manager.add_message("assistant", final_reply)
+
+                await self.agent.post_control({"event": "switch_workflow", "name": "default"})
                 return
 
-            # Normal reply
+            # Build safe final reply
+            final_reply = text_buffer.strip()
             if not final_reply and tool_results:
                 final_reply = "\n\n".join(tool_results)
-            elif not final_reply:
+            if not final_reply:
                 final_reply = "✅ Tool executed successfully."
 
-            logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
+            should_continue = bool(tool_results) and not text_buffer.strip() and loop_count < max_tool_loops
 
+            if should_continue:
+                logger.info(f"Tool results added → looping again (iteration {loop_count}/{max_tool_loops})")
+                continue
+
+            # Final answer to user
             yield (
                 "llm_response",
                 {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
             )
             await self.agent.context_manager.add_message("assistant", final_reply)
-            logger.debug("Message added to context")
-            break  # Exit restart loop
+            break
+
+        if loop_count >= max_tool_loops:
+            logger.warning("Maximum tool loops reached")
 
     async def _generate_user_friendly_summary(self, state: AgentState) -> str:
         """Generates a natural, friendly summary that will be shown to the user
