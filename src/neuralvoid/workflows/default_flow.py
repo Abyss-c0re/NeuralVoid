@@ -38,7 +38,7 @@ class AgentFlow:
         return f"""You are a helpful Deploy Agent.
         Speak naturally and concisely.
         - Simple questions → answer directly.
-        - Complex requests → call **RequestComplexAction**.
+        - Complex requests → call **DeploySubAgent**.
         - When you see [DEPLOYMENT COMPLETE], respond friendly.
 
         Current goal: {self.agent.goal or "General assistance"}"""
