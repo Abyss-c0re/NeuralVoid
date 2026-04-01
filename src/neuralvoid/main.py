@@ -46,7 +46,17 @@ def main():
         - Inside the app folder""")
         sys.exit(1)
 
-    agent_id = args.agent or "agent_002"  # default to casual chat agent
+    if args.agent:
+        # User-provided --agent always takes highest priority
+        agent_id = args.agent
+    elif args.deploy:
+        # Headless mode default
+        agent_id = "agent_001"
+    else:
+        # UI / Interactive mode default
+        agent_id = "agent_002"
+
+    agent = loader.load_agent_from_config(agent_id)
     agent = loader.load_agent_from_config(agent_id)
     AgentFlow(agent)  # loading default workflows.
 
