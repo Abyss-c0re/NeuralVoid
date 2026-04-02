@@ -70,15 +70,19 @@ clients:
       fastembed_model: "BAAI/bge-small-en-v1.5"
 
 tools:
-  # Just list each tool set by name
-# FastAssistant: {} # Expose client's method as a tool for agent
-  FileEditingTools: {}
-  TerminalTools: {}
-  CodingTools: {}
-  WebTools: {}
-   # Default internal tool file: tools/terminal_set.py
-  #  external_set:
-  #   folder: ~/mytools     # Optional external folder, auto-load all .py files
+  FileEditingTools:
+    modules:
+      - file_set
+  TerminalTools:
+    modules:
+      - terminal_set
+  CodingTools:
+    modules:
+      - code_set
+  WebTools:
+    modules:
+      - web_set
+      
 workflows:
   deploy_chat:
     name: "deploy_chat"
