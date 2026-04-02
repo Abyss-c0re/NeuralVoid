@@ -7,42 +7,35 @@ from neuralcore.agents.state import AgentState
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.workflows.executors import AgentExecutors
+from neuralcore.utils.formatting import prepare_chat_messages
 
 from typing import List
 
 logger = Logger.get_logger()
 
+
 # ==================== CONDITIONS ====================
-
-
 @workflow.condition("subtask_complete")
 def subtask_complete(state: AgentState, args=None):
     """Break condition for agentic_loop"""
     return getattr(state, "is_complete", False)
 
 
-# ==================== LOOPS - Register ORIGINAL functions ====================
 @workflow.condition("has_final_reply")
 def has_final_reply(state: AgentState, args=None):
+    """Break condition for chat_tool_loop"""
     full_reply = getattr(state, "full_reply", "").strip()
     has_tools = bool(
         getattr(state, "tool_calls", None) and len(getattr(state, "tool_calls", [])) > 0
     )
-
-    # Require a bit more substance for final reply
-    result = bool(full_reply) and not has_tools and len(full_reply) > 15
-
-    logger.debug(
-        f"[has_final_reply] len={len(full_reply)} has_tools={has_tools} → {result}"
-    )
-    return result
+    return bool(full_reply) and not has_tools and len(full_reply) > 15
 
 
+# ==================== LOOPS ====================
 @workflow.loop("chat_tool_loop", max_iterations=10, break_condition="has_final_reply")
 async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
-    """Chat mode loop - now handles waiting for new user messages internally"""
-
-    while True:  # This loop waits for new user messages
+    """Chat mode loop — waits for new user messages and runs simplified chat_loop"""
+    while True:
         try:
             raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
@@ -52,8 +45,9 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
         except asyncio.CancelledError:
             break
 
-        # Handle control events (sub_task, switch_workflow, etc.)
+        # Handle control events
         if isinstance(raw_msg, dict) and "event" in raw_msg:
+            agent.manager.reset_to_default_package("deploy_chat_loop", agent.workflow)
             ev = raw_msg["event"]
             if ev in ("sub_task_completed", "sub_task_failed"):
                 yield (ev, raw_msg)
@@ -64,36 +58,33 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
                 name = raw_msg.get("name")
                 if isinstance(name, dict):
                     name = name.get("name") or next(iter(name.keys()), "deploy_chat")
-                if not isinstance(name, str):
-                    name = "deploy_chat"
-
                 logger.info(f"Switching workflow to: {name}")
                 try:
-                    agent.workflow.switch_workflow(name)  # or self.engine
+                    agent.workflow.switch_workflow(name)
                 except Exception as e:
                     logger.error(f"Workflow switch failed: {e}", exc_info=True)
-
                 agent.message_queue.task_done()
                 continue
 
-        # Extract content
+        # Extract user content
         content = (
             raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
         )
         if not content.strip():
             agent.message_queue.task_done()
             continue
+
         state.full_reply = ""
         state.tool_calls = None
 
-        # Now run the actual chat logic for this message
-        messages = await agent.context_manager.provide_context(
-            query=content,
-            chat=True,
-            system_prompt=agent.flow._build_chat_system_prompt(),
-        )
+        agent.manager.reset_to_default_package("deploy_chat_loop", agent.workflow)
 
-        async for ev, pl in agent.flow.executors.chat_loop(messages, state):
+        async for ev, pl in agent.flow.executors.chat_loop(
+            prepare_chat_messages(
+                content, system_prompt=agent.flow._build_chat_system_prompt()
+            ),
+            state,
+        ):
             yield ev, pl
 
         agent.message_queue.task_done()
@@ -101,12 +92,12 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
 
 @workflow.loop("agentic_loop", max_iterations=15, break_condition="subtask_complete")
 async def agentic_loop(agent, state: AgentState):
-    """Thin wrapper around the original agentic_loop"""
-    # iteration=0 is what the original expects as first argument
+    """Thin wrapper around the simplified agentic_loop"""
     async for ev, pl in agent.flow.executors.agentic_loop(0, state):
         yield ev, pl
 
 
+# ==================== MAIN FLOWS ====================
 class AgentFlow:
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
@@ -121,21 +112,21 @@ class AgentFlow:
     def __init__(self, agent):
         self.agent = agent
         self.engine = agent.workflow
-
         self.executors = AgentExecutors(agent, self.Phase)
         self.agent.flow = self
         workflow.bind_to_engine(self.engine, instance=self)
 
     # ==================== SYSTEM PROMPTS ====================
-
     def _build_chat_system_prompt(self) -> str:
-        return f"""You are a helpful Deploy Agent.
-        Speak naturally and concisely.
-        - Simple questions → answer directly.
-        - Complex requests → call **DeploySubAgent**.
-        - When you see [DEPLOYMENT COMPLETE], respond friendly.
+        return f"""You are a helpful Deploy Agent that executes commands **immediately**.
 
-        Current goal: {self.agent.goal or "General assistance"}"""
+        RULES (follow strictly):
+        - Use tool browser to load missing tools.
+        - Only for genuinely complex/multi-step requests should you plan or call DeploySubAgent.
+        - Keep responses short and natural after the tool result.
+        - Current goal: {self.agent.goal or "General assistance"}
+
+        Speak concisely and act fast."""
 
     def _build_sub_agent_system_prompt(
         self, task_desc: str, assigned_tools: List[str]
@@ -155,31 +146,15 @@ class AgentFlow:
         - When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
         - Never mention other steps or the overall project."""
 
-    # ==================== MISSING HELPER (restored) ====================
-
-    def _build_sub_agent_objective_reminder(self) -> str:
-        """Restored method - used by agentic_loop"""
-        return (
-            f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}\n\n"
-            f"When you have fully completed the task, end your response with exactly: {AgentFlow.FINAL_ANSWER_MARKER}"
-        )
-
-    def _build_objective_reminder(self) -> str:
-        """Original helper - kept for backward compatibility"""
-        return f"Current goal: {self.agent.goal}"
-
     # ==================== WORKFLOWS ====================
-
     @workflow.set("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
-        """Persistent chat mode — stays in this step forever until stop/cancel"""
-
+        """Persistent chat mode"""
         if iteration == 0:
             state.phase = self.Phase.CHAT
             yield ("phase_changed", {"phase": "chat"})
             logger.info(f"Agent '{self.agent.name}' → Chat mode started")
 
-        # Run the inner message-waiting loop FOREVER (or until stop_event)
         while True:
             if (
                 getattr(self.agent, "_stop_event", None)
@@ -193,8 +168,7 @@ class AgentFlow:
             ):
                 yield ev, pl
 
-            # Optional: small pause to avoid tight CPU loop if no messages
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.01)  # prevent tight CPU loop
 
     @workflow.set("sub_agent_execute", name="llm_stream")
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
