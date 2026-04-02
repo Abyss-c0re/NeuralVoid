@@ -21,6 +21,14 @@ def subtask_complete(state: AgentState, args=None):
     return getattr(state, "is_complete", False)
 
 
+@workflow.condition("goal_achieved")
+def goal_achieved(state: AgentState, args=None):
+    return getattr(state, "is_complete", False) and not any(
+        w in str(getattr(state, "full_reply", "")).lower()
+        for w in ["error", "failed", "try again"]
+    )
+
+
 @workflow.condition("has_final_reply")
 def has_final_reply(state: AgentState, args=None):
     """Break condition for chat_tool_loop"""
@@ -32,7 +40,7 @@ def has_final_reply(state: AgentState, args=None):
 
 
 # ==================== LOOPS ====================
-@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="has_final_reply")
+@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="goal_achieved")
 async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
     """Chat mode loop — waits for new user messages and runs simplified chat_loop"""
     while True:
