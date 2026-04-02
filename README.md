@@ -179,5 +179,4 @@ workflows:
 **Compatibility & Environment Notes**:
 - The software was primarily tested with **llama.cpp** (local inference server).  
   However, because it uses the standard **OpenAI Python client** under the hood, it is compatible with many other providers such as OpenAI, Groq, Together.ai, Fireworks, and any OpenAI-compatible endpoint.
-- The current **TerminalTools** set is designed for **Linux** environments.
 - Tokenizer must be explicitly specified in `config.yaml` for every client (either a local JSON file path or a Hugging Face tokenizer tag).
