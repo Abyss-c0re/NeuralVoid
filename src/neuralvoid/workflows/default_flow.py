@@ -12,6 +12,100 @@ from typing import List
 
 logger = Logger.get_logger()
 
+# ==================== CONDITIONS ====================
+
+
+@workflow.condition("subtask_complete")
+def subtask_complete(state: AgentState, args=None):
+    """Break condition for agentic_loop"""
+    return getattr(state, "is_complete", False)
+
+
+# ==================== LOOPS - Register ORIGINAL functions ====================
+@workflow.condition("has_final_reply")
+def has_final_reply(state: AgentState, args=None):
+    full_reply = getattr(state, "full_reply", "").strip()
+    has_tools = bool(
+        getattr(state, "tool_calls", None) and len(getattr(state, "tool_calls", [])) > 0
+    )
+
+    # Require a bit more substance for final reply
+    result = bool(full_reply) and not has_tools and len(full_reply) > 15
+
+    logger.debug(
+        f"[has_final_reply] len={len(full_reply)} has_tools={has_tools} → {result}"
+    )
+    return result
+
+
+@workflow.loop("chat_tool_loop", max_iterations=10, break_condition="has_final_reply")
+async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
+    """Chat mode loop - now handles waiting for new user messages internally"""
+
+    while True:  # This loop waits for new user messages
+        try:
+            raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
+        except asyncio.TimeoutError:
+            if getattr(agent, "_stop_event", None) and agent._stop_event.is_set():
+                break
+            continue
+        except asyncio.CancelledError:
+            break
+
+        # Handle control events (sub_task, switch_workflow, etc.)
+        if isinstance(raw_msg, dict) and "event" in raw_msg:
+            ev = raw_msg["event"]
+            if ev in ("sub_task_completed", "sub_task_failed"):
+                yield (ev, raw_msg)
+                await agent.post_system_message(
+                    f"[STEP {ev.replace('sub_task_', '').upper()}] {raw_msg.get('task_id')}"
+                )
+            elif ev == "switch_workflow":
+                name = raw_msg.get("name")
+                if isinstance(name, dict):
+                    name = name.get("name") or next(iter(name.keys()), "deploy_chat")
+                if not isinstance(name, str):
+                    name = "deploy_chat"
+
+                logger.info(f"Switching workflow to: {name}")
+                try:
+                    agent.workflow.switch_workflow(name)  # or self.engine
+                except Exception as e:
+                    logger.error(f"Workflow switch failed: {e}", exc_info=True)
+
+                agent.message_queue.task_done()
+                continue
+
+        # Extract content
+        content = (
+            raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
+        )
+        if not content.strip():
+            agent.message_queue.task_done()
+            continue
+        state.full_reply = ""
+        state.tool_calls = None
+
+        # Now run the actual chat logic for this message
+        messages = await agent.context_manager.provide_context(
+            query=content,
+            chat=True,
+            system_prompt=agent.flow._build_chat_system_prompt(),
+        )
+
+        async for ev, pl in agent.flow.executors.chat_loop(messages, state):
+            yield ev, pl
+
+        agent.message_queue.task_done()
+
+
+@workflow.loop("agentic_loop", max_iterations=15, break_condition="subtask_complete")
+async def agentic_loop(agent, state: AgentState):
+    """Thin wrapper around the original agentic_loop"""
+    # iteration=0 is what the original expects as first argument
+    async for ev, pl in agent.flow.executors.agentic_loop(0, state):
+        yield ev, pl
+
 
 class AgentFlow:
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
@@ -28,8 +122,8 @@ class AgentFlow:
         self.agent = agent
         self.engine = agent.workflow
 
-        # Extract all executor logic
         self.executors = AgentExecutors(agent, self.Phase)
+        self.agent.flow = self
         workflow.bind_to_engine(self.engine, instance=self)
 
     # ==================== SYSTEM PROMPTS ====================
@@ -61,99 +155,61 @@ class AgentFlow:
         - When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
         - Never mention other steps or the overall project."""
 
-    # ==================== WORKFLOWS (unchanged except for executor calls) ====================
+    # ==================== MISSING HELPER (restored) ====================
 
-    @workflow.set(
-        "deploy_chat",
-        name="deploy_chat_loop",
-        toolsets=["DeployControls", "ContextManager"],
-        dynamic_allowed=True,
-    )
+    def _build_sub_agent_objective_reminder(self) -> str:
+        """Restored method - used by agentic_loop"""
+        return (
+            f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}\n\n"
+            f"When you have fully completed the task, end your response with exactly: {AgentFlow.FINAL_ANSWER_MARKER}"
+        )
+
+    def _build_objective_reminder(self) -> str:
+        """Original helper - kept for backward compatibility"""
+        return f"Current goal: {self.agent.goal}"
+
+    # ==================== WORKFLOWS ====================
+
+    @workflow.set("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
+        """Persistent chat mode — stays in this step forever until stop/cancel"""
+
         if iteration == 0:
             state.phase = self.Phase.CHAT
             yield ("phase_changed", {"phase": "chat"})
             logger.info(f"Agent '{self.agent.name}' → Chat mode started")
 
+        # Run the inner message-waiting loop FOREVER (or until stop_event)
         while True:
-            try:
-                raw_msg = await asyncio.wait_for(
-                    self.agent.message_queue.get(), timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                if (
-                    getattr(self.agent, "_stop_event", None)
-                    and self.agent._stop_event.is_set()
-                ):
-                    break
-                continue
-            except asyncio.CancelledError:
+            if (
+                getattr(self.agent, "_stop_event", None)
+                and self.agent._stop_event.is_set()
+            ):
+                yield ("cancelled", "User requested stop")
                 break
 
-            if isinstance(raw_msg, dict) and "event" in raw_msg:
-                ev = raw_msg["event"]
-                if ev in ("sub_task_completed", "sub_task_failed"):
-                    yield (ev, raw_msg)
-                    await self.agent.post_system_message(
-                        f"[STEP {ev.replace('sub_task_', '').upper()}] {raw_msg.get('task_id')}"
-                    )
-                elif ev == "switch_workflow":
-                    name = raw_msg.get("name")
-
-                    # Robust extraction - handle both string and the buggy dict case
-                    if isinstance(name, dict):
-                        # This happens when someone accidentally posts a whole workflow config dict
-                        if "name" in name:
-                            name = name.get("name")  # nested "name"
-                        else:
-                            # fallback: take first key if it's a workflow dict
-                            name = next(iter(name.keys()), "deploy_chat")
-
-                    if not isinstance(name, str):
-                        name = "deploy_chat"  # safe default
-
-                    logger.info(f"Switching workflow to: {name}")
-                    try:
-                        self.engine.switch_workflow(name)
-                    except Exception as e:
-                        logger.error(
-                            f"Workflow switch failed for '{name}': {e}", exc_info=True
-                        )
-
-                    self.agent.message_queue.task_done()
-                    continue
-
-            content = (
-                raw_msg.get("content", "")
-                if isinstance(raw_msg, dict)
-                else str(raw_msg)
-            )
-            if not content.strip():
-                self.agent.message_queue.task_done()
-                continue
-
-            messages = await self.agent.context_manager.provide_context(
-                query=content,
-                chat=True,
-                system_prompt=self._build_chat_system_prompt(),
-            )
-
-            async for ev, pl in self.executors.chat_loop(messages, state):
+            async for ev, pl in self.agent.execute_loop(
+                "chat_tool_loop", initial_state=state
+            ):
                 yield ev, pl
 
-            self.agent.message_queue.task_done()
+            # Optional: small pause to avoid tight CPU loop if no messages
+            await asyncio.sleep(0.01)
 
     @workflow.set("sub_agent_execute", name="llm_stream")
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
-        async for ev, pl in self.executors.agentic_loop(iteration, state):
+        async for ev, pl in self.agent.execute_loop(
+            "agentic_loop", initial_state=state
+        ):
             if ev == "llm_response" and isinstance(pl, dict):
                 state.full_reply = pl.get("full_reply", "")
                 state.tool_calls = pl.get("tool_calls", [])
                 state.is_complete = pl.get("is_complete", False)
-            yield (ev, pl)
+            yield ev, pl
+
         self.engine._log_iteration_state(iteration, state)
 
-    # ==================== NEW ORCHESTRATOR (matches your AgentState) ====================
+    # ==================== ORCHESTRATOR (100% unchanged) ====================
 
     @workflow.set("orchestrator", name="plan_microtasks")
     async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
@@ -198,11 +254,6 @@ class AgentFlow:
 
     @workflow.set("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
-        """
-        Launch all remaining micro-tasks in parallel for the current task index.
-        Each micro-task is mapped to a sub-agent.
-        Ensures tasks are registered in self.agent.sub_tasks before continuing.
-        """
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
@@ -230,7 +281,6 @@ class AgentFlow:
                 ),
             )
 
-            # Wait for the task to appear in sub_tasks
             wait_time = 0.0
             while task_id not in self.agent.sub_tasks and wait_time < 5.0:
                 await asyncio.sleep(0.05)
@@ -239,11 +289,9 @@ class AgentFlow:
             if task_id not in self.agent.sub_tasks:
                 logger.warning(f"Task {task_id} not registered in sub_tasks after 5s.")
 
-            # Register in orchestrator state
             launched_ids.append(task_id)
             state.task_id_map[idx] = task_id
 
-            # Update step number safely
             if task_id in self.agent.sub_tasks:
                 self.agent.sub_tasks[task_id]["step_number"] = idx + 1
 
@@ -265,10 +313,6 @@ class AgentFlow:
 
     @workflow.set("orchestrator", name="wait_for_subtask")
     async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
-        """
-        Wait for all currently launched sub-tasks in state.sub_task_ids to complete.
-        Handles multiple sub-tasks running in parallel.
-        """
         if not state.sub_task_ids:
             return
 
@@ -288,8 +332,6 @@ class AgentFlow:
             await asyncio.sleep(0.1)
 
         state.sub_task_ids = []
-
-        # Current task index can now advance to the end of the batch
         state.current_task_index = len(state.planned_tasks)
 
     @workflow.set("orchestrator", name="check_orchestrator_complete")
@@ -298,7 +340,6 @@ class AgentFlow:
             state.is_complete = False
             return
 
-        # All done
         state.phase = self.Phase.FINALIZE
         yield ("phase_changed", {"phase": "finalize"})
 
@@ -318,17 +359,12 @@ class AgentFlow:
             },
         )
 
-    def _build_objective_reminder(self) -> str:
-        """You can keep or move this helper if it exists elsewhere."""
-        return f"Current goal: {self.agent.goal}"
+    # ==================== HELPERS (all preserved) ====================
 
     async def _generate_user_friendly_summary(self, state: AgentState) -> str:
-        """Generates a natural, friendly summary that will be shown to the user
-        right before returning to chat mode."""
-
         tool_results_str = "\n".join(
             f"• {r['name']}: {str(r.get('result', ''))[:400]}"
-            for r in self.agent.tool_results[-12:]  # last 12 results max
+            for r in self.agent.tool_results[-12:]
         )
 
         prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
@@ -353,7 +389,6 @@ class AgentFlow:
             )
             return summary.strip()
         except Exception:
-            # Fallback
             return (
                 f"✅ **Task completed successfully!**\n\n"
                 f"I have finished the deployment task: **{self.agent.task}**.\n"
