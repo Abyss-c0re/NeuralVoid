@@ -3,41 +3,6 @@ import json
 from typing import Optional
 
 
-def _format_block(title: str, body: str, icon: str = "") -> str:
-    title_line = f"**{icon} {title}**".strip()
-    body = str(body).strip()
-    return f"\n\n---\n{title_line}\n\n{body}\n---\n"
-
-
-def _format_text(text: str) -> str:
-    lines = text.split("\n")
-    formatted = []
-    in_code = False
-
-    for line in lines:
-        line = line.rstrip()
-
-        if line.startswith("```"):
-            in_code = not in_code
-            formatted.append(line)
-            continue
-
-        if in_code:
-            formatted.append(line)
-            continue
-
-        if line.strip().startswith(tuple(f"{i}." for i in range(1, 10))):
-            num, rest = line.split(".", 1)
-            formatted.append(f"**{num}.** {rest.strip()}")
-        else:
-            formatted.append(line)
-
-    if in_code:
-        formatted.append("```")
-
-    return "\n".join(formatted).strip()
-
-
 def _build_tool_markdown(
     name: str,
     args: dict,

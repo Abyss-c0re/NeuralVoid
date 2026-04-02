@@ -2,8 +2,7 @@ import asyncio
 import json
 import time
 
-from typing import Optional, Union, List, Any, Dict
-
+from typing import Optional, Union, Any
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Markdown
 from textual.containers import VerticalScroll
@@ -15,7 +14,7 @@ from neuralcore.actions.manager import DynamicActionManager
 
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
-from neuralvoid.ui.helpers import _build_tool_markdown, _format_block, _format_text
+from neuralvoid.ui.helpers import _build_tool_markdown
 
 
 from neuralcore.utils.logger import Logger
@@ -40,13 +39,35 @@ class Message(Markdown):
         super().__init__(self.render_markdown())
 
     def update_status(self, text: str) -> None:
-        """Update only the tiny status line at the bottom."""
+        """FORCE update on the main Textual thread."""
         self.status_line = text.strip()
-        self.update(self.render_markdown())
+
+        def _do_update():
+            self.update(self.render_markdown())
+            self.refresh()  # widget
+            if self.app:
+                self.app.refresh(layout=True)  # full screen
+                self.app.call_later(self.refresh)  # next frame safety
+
+        if self.app:
+            self.app.call_later(_do_update)
+        else:
+            _do_update()
+
+        logger.debug(f"[UI] STATUS UPDATED → {text[:60]}...")
 
     def clear_status(self) -> None:
         self.status_line = ""
-        self.update(self.render_markdown())
+        if self.app:
+            self.app.call_later(
+                lambda: (
+                    self.update(self.render_markdown()),
+                    self.refresh(),
+                    self.app.refresh(layout=True),
+                )
+            )
+        else:
+            self.update(self.render_markdown())
 
     def render_markdown(self) -> str:
         if self.role == "user":
@@ -61,7 +82,6 @@ class Message(Markdown):
         main = prefix + self.buffer
 
         if self.status_line:
-            # Tiny dimmed status (never clogs the main content)
             status = f"\n\n<span style='dim'>└─ {self.status_line}</span>"
             return main + status
         return main
@@ -186,8 +206,7 @@ class LLMChatApp(App):
     _current_assistant_msg: Optional[Message] = None
 
     async def _run_agent_forever(self):
-        """Single persistent consumer. Creates assistant bubble ONLY when real content arrives.
-        Properly forwards sub-task progression signals."""
+        """Single persistent consumer with MAXIMUM UI forcing."""
         try:
             async for event_type, payload in self.agent.run(
                 user_prompt=None,
@@ -196,7 +215,8 @@ class LLMChatApp(App):
                 max_tokens=self.max_tokens,
                 chat_mode=True,
             ):
-                # Create a new assistant message only when we have meaningful content
+                logger.debug(f"[UI RUNNER] Received event: {event_type}")  # ← debug
+
                 if event_type in (
                     "content_delta",
                     "llm_response",
@@ -210,6 +230,9 @@ class LLMChatApp(App):
                     self._current_tool_buffer = ""
                     self._last_finished = False
 
+                    self.chat.refresh(layout=True)
+                    self.refresh()
+
                 if self._current_assistant_msg is None:
                     continue
 
@@ -217,8 +240,8 @@ class LLMChatApp(App):
                     event_type, payload, self._current_assistant_msg
                 )
 
-                # Reset for next turn when a full response finishes
-                if event_type == "finish" or event_type == "llm_response":
+                # Reset for next turn
+                if event_type in ("finish", "llm_response"):
                     self._last_finished = True
                     self._current_assistant_msg = None
 
@@ -253,15 +276,30 @@ class LLMChatApp(App):
         # ── Phase changes ───────────────────────
 
         if event_type == "phase_changed":
-            phase = payload.get("phase", "unknown")
+            phase = payload.get("phase", "unknown").strip()
+            logger.debug(f"[UI] PHASE_CHANGED received: {phase}")  # ← debug
+
             if self._current_assistant_msg:
-                self._current_assistant_msg.update_status(
-                    f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} {phase.upper()}"
-                )
+                spinner = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]
                 self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+
+                if "calling" in phase.lower():
+                    status_text = f"🔨 {phase}"
+                elif "executing" in phase.lower():
+                    status_text = f"⚡ {phase.upper()}"
+                elif "synthesizing" in phase.lower() or "final" in phase.lower():
+                    status_text = f"✨ {phase.upper()}"
+                elif "reflecting" in phase.lower():
+                    status_text = f"🤔 {phase.upper()}"
+                else:
+                    status_text = f"{spinner} {phase.upper()}"
+
+                self._current_assistant_msg.update_status(status_text)
+                self.chat.scroll_end(animate=False)
+                self.refresh()  # extra safety
             return
 
-            # ── Sub-task progression (NEW — this was missing) ─────────────────────
+        # ── Sub-task progression (NEW — this was missing) ─────────────────────
         elif event_type == "step_completed":
             summary = payload.get("summary", "") or str(payload)
             self._current_pure_text += f"\n✅ **Step completed**\n{summary}\n\n"
