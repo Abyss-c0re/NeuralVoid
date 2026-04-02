@@ -1,93 +1,116 @@
 from neuralcore.actions.manager import tool
 import os
-import subprocess
 import shutil
 
 
 # ─────────────────────────────────────────────────────────────
-# FILESYSTEM / NAVIGATION
+# FILESYSTEM / NAVIGATION (Pure Python - Cross-platform)
 # ─────────────────────────────────────────────────────────────
 
 
-@tool("TerminalTools", tags=["filesystem", "list", "navigation"], name="ls")
-def exec_ls(path: str = ".") -> str:
-    """List files in a directory."""
-    return subprocess.run(
-        ["ls", "-la", path], capture_output=True, text=True
-    ).stdout.strip()
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "list", "navigation"],
+    name="list_directory",
+    description="List files and folders in a directory.",
+)
+async def list_directory(path: str = ".") -> str:
+    """List files in directory."""
+    try:
+        items = os.listdir(path)
+        result = []
+        for item in sorted(items):
+            full_path = os.path.join(path, item)
+            prefix = "📁 " if os.path.isdir(full_path) else "📄 "
+            result.append(f"{prefix}{item}")
+        return "\n".join(result) if result else "Directory empty."
+    except Exception as e:
+        return f"list_directory error: {str(e)}"
 
 
-@tool("TerminalTools", tags=["filesystem", "directory", "current"], name="pwd")
-def exec_pwd() -> str:
-    """Print working directory."""
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "directory", "current"],
+    name="get_current_directory",
+    description="Get the current working directory path.",
+)
+async def get_current_directory() -> str:
+    """Get current working directory."""
     return os.getcwd()
 
 
-# ---------------- CD ----------------
-@tool("TerminalTools", tags=["filesystem", "directory", "navigation"], name="cd")
-def exec_cd(path: str, as_dict: bool = False):
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "directory", "navigation"],
+    name="change_directory",
+    description="Change the current working directory.",
+)
+async def change_directory(path: str) -> str:
     """Change current working directory."""
     try:
         os.chdir(path)
-        msg = f"Changed directory to '{os.getcwd()}'"
-        return (
-            {"status": "success", "cwd": os.getcwd(), "message": msg}
-            if as_dict
-            else msg
-        )
+        return f"Changed directory to '{os.getcwd()}'"
     except FileNotFoundError:
-        msg = f"cd: no such file or directory: '{path}'"
+        return f"change_directory: no such file or directory: '{path}'"
     except NotADirectoryError:
-        msg = f"cd: not a directory: '{path}'"
+        return f"change_directory: not a directory: '{path}'"
     except PermissionError:
-        msg = f"cd: permission denied: '{path}'"
+        return f"change_directory: permission denied: '{path}'"
     except Exception as e:
-        msg = f"cd error: {str(e)}"
-    return {"status": "error", "message": msg} if as_dict else msg
+        return f"change_directory error: {str(e)}"
 
 
 # ─────────────────────────────────────────────────────────────
-# FILE OPERATIONS
+# FILE/DIR OPERATIONS
 # ─────────────────────────────────────────────────────────────
 
 
-@tool("TerminalTools", tags=["filesystem", "directory", "create"], name="mkdir")
-def exec_mkdir(path: str, as_dict: bool = False):
-    """Create a directory."""
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "directory", "create"],
+    name="create_directory",
+    description="Create a new directory (and parent folders if needed).",
+)
+async def create_directory(path: str) -> str:
+    """Create directory."""
     try:
         os.makedirs(path, exist_ok=True)
-        msg = f"Created directory '{path}'"
-        return {"status": "success", "message": msg} if as_dict else msg
+        return f"Created directory '{path}'"
     except Exception as e:
-        msg = f"mkdir error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
+        return f"create_directory error: {str(e)}"
 
 
-@tool("TerminalTools", tags=["filesystem", "file", "copy"], name="cp")
-def exec_cp(source: str, destination: str, as_dict: bool = False):
-    """Copy a file or directory."""
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "file", "copy"],
+    name="copy",
+    description="Copy a file or directory.",
+)
+async def copy(source: str, destination: str) -> str:
+    """Copy file or directory."""
     try:
         if os.path.isdir(source):
             shutil.copytree(source, destination, dirs_exist_ok=True)
         else:
             shutil.copy2(source, destination)
-        msg = f"Copied '{source}' → '{destination}'"
-        return {"status": "success", "message": msg} if as_dict else msg
+        return f"Copied '{source}' → '{destination}'"
     except Exception as e:
-        msg = f"cp error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
+        return f"copy error: {str(e)}"
 
 
-@tool("TerminalTools", tags=["filesystem", "file", "move"], name="mv")
-def exec_mv(source: str, destination: str, as_dict: bool = False):
-    """Move or rename a file or directory."""
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "file", "move"],
+    name="move",
+    description="Move or rename a file or directory.",
+)
+async def move(source: str, destination: str) -> str:
+    """Move or rename file/directory."""
     try:
         shutil.move(source, destination)
-        msg = f"Moved '{source}' → '{destination}'"
-        return {"status": "success", "message": msg} if as_dict else msg
+        return f"Moved '{source}' → '{destination}'"
     except Exception as e:
-        msg = f"mv error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
+        return f"move error: {str(e)}"
 
 
 @tool(
@@ -95,99 +118,109 @@ def exec_mv(source: str, destination: str, as_dict: bool = False):
     tags=["filesystem", "file", "delete"],
     name="delete_file",
     require_confirmation=True,
+    description="Delete a single file (requires confirmation).",
 )
-def exec_delete_file(file_path: str, as_dict: bool = False):
-    """Delete a file (requires confirmation)."""
-    if not os.path.isfile(file_path):
-        msg = f"File not found: '{file_path}'"
-        return {"status": "error", "message": msg} if as_dict else msg
+async def delete_file(file_path: str) -> str:
+    """Delete a file."""
     try:
+        if not os.path.isfile(file_path):
+            return f"File not found: '{file_path}'"
         os.remove(file_path)
-        msg = f"Deleted file '{file_path}'"
-        return {"status": "success", "message": msg} if as_dict else msg
+        return f"Deleted file '{file_path}'"
     except Exception as e:
-        msg = f"delete_file error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
+        return f"delete_file error: {str(e)}"
 
 
 @tool(
     "TerminalTools",
     tags=["filesystem", "directory", "delete"],
-    name="delete_dir",
+    name="delete_directory",
     require_confirmation=True,
+    description="Delete a directory and all its contents (requires confirmation).",
 )
-def exec_delete_dir(dir_path: str, as_dict: bool = False):
-    """Delete a directory recursively (requires confirmation)."""
-    if not os.path.isdir(dir_path):
-        msg = f"Directory not found: '{dir_path}'"
-        return {"status": "error", "message": msg} if as_dict else msg
+async def delete_directory(dir_path: str) -> str:
+    """Delete directory recursively."""
     try:
+        if not os.path.isdir(dir_path):
+            return f"Directory not found: '{dir_path}'"
         shutil.rmtree(dir_path)
-        msg = f"Deleted directory '{dir_path}'"
-        return {"status": "success", "message": msg} if as_dict else msg
+        return f"Deleted directory '{dir_path}'"
     except Exception as e:
-        msg = f"delete_dir error: {str(e)}"
-        return {"status": "error", "message": msg} if as_dict else msg
+        return f"delete_directory error: {str(e)}"
 
 
 # ─────────────────────────────────────────────────────────────
-# SEARCH & ANALYSIS
+# SEARCH
 # ─────────────────────────────────────────────────────────────
 
 
-@tool("TerminalTools", tags=["filesystem", "search"], name="find")
-def exec_find(path: str = ".", name: str = "") -> str:
-    """Find files optionally by name."""
-    cmd = ["find", path]
-    if name:
-        cmd += ["-name", name]
-    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
-
-
-@tool("TerminalTools", tags=["filesystem", "search", "regex"], name="grep")
-def exec_grep(
-    pattern: str, file_path: str, recursive: bool = False, case_sensitive: bool = True
-) -> str:
-    """Search for pattern in file or directory."""
-    cmd = ["grep"]
-    if not case_sensitive:
-        cmd.append("-i")
-    if recursive:
-        cmd.append("-r")
-    cmd += [pattern, file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode == 1:
-        return "(no matches)"
-    elif result.returncode == 0:
-        return result.stdout.strip()
-    else:
-        return f"grep error: {result.stderr.strip() or '(exit code ' + str(result.returncode) + ')'}"
-
-
-# ─────────────────────────────────────────────────────────────
-# STRUCTURE & METADATA
-# ─────────────────────────────────────────────────────────────
-
-
-@tool("TerminalTools", tags=["filesystem", "directory"], name="tree")
-def exec_tree(path: str = ".", max_depth: int = 3) -> str:
-    """Display directory tree (requires tree command)."""
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "search"],
+    name="search_files",
+    description="Search for files or folders by name.",
+)
+async def search_files(path: str = ".", name: str = "") -> str:
+    """Search files by name."""
     try:
-        result = subprocess.run(
-            ["tree", "-L", str(max_depth), path], capture_output=True, text=True
-        )
-        return (
-            result.stdout.rstrip()
-            if result.returncode == 0
-            else result.stderr.strip() or "tree command failed"
-        )
-    except FileNotFoundError:
-        return "tree command not available"
+        results = []
+        for root, dirs, files in os.walk(path):
+            for item in files + dirs:
+                if not name or name.lower() in item.lower():
+                    results.append(os.path.join(root, item))
+        return "\n".join(results) if results else "(no matches)"
+    except Exception as e:
+        return f"search_files error: {str(e)}"
 
 
-@tool("TerminalTools", tags=["filesystem", "metadata"], name="stat")
-def exec_stat(path: str) -> str:
-    """Show file status."""
-    return subprocess.run(
-        ["stat", path], capture_output=True, text=True
-    ).stdout.rstrip()
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "search", "regex"],
+    name="search_text",
+    description="Search for text pattern inside files.",
+)
+async def search_text(pattern: str, file_path: str, recursive: bool = False) -> str:
+    """Search text in file(s)."""
+    try:
+        results = []
+        paths = [file_path]
+        if recursive and os.path.isdir(file_path):
+            paths = []
+            for root, _, files in os.walk(file_path):
+                paths.extend(os.path.join(root, f) for f in files)
+        for p in paths:
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        for i, line in enumerate(f, 1):
+                            if pattern in line:
+                                results.append(f"{p}:{i}:{line.strip()}")
+                except Exception:
+                    continue
+        return "\n".join(results) if results else "(no matches)"
+    except Exception as e:
+        return f"search_text error: {str(e)}"
+
+
+# ─────────────────────────────────────────────────────────────
+# METADATA
+# ─────────────────────────────────────────────────────────────
+
+
+@tool(
+    "TerminalTools",
+    tags=["filesystem", "metadata"],
+    name="get_file_info",
+    description="Get detailed information about a file or directory.",
+)
+async def get_file_info(path: str) -> str:
+    """Get file or directory information."""
+    try:
+        if not os.path.exists(path):
+            return f"Path not found: '{path}'"
+        size = os.path.getsize(path) if os.path.isfile(path) else "-"
+        mtime = os.path.getmtime(path)
+        is_dir = os.path.isdir(path)
+        return f"Path: {path}\nType: {'Directory' if is_dir else 'File'}\nSize: {size} bytes\nModified: {mtime}"
+    except Exception as e:
+        return f"get_file_info error: {str(e)}"

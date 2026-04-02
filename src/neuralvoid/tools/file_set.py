@@ -1,98 +1,206 @@
-from neuralcore.actions.manager import tool
+import os
+import base64
+import asyncio
 import aiofiles
+from PIL import Image
+from io import BytesIO
+from neuralcore.actions.manager import tool
 
 
 # ─────────────────────────────────────────────────────────────
-# File Writing Tools
+# File Editing Tools (ALL ASYNC)
 # ─────────────────────────────────────────────────────────────
 
 
 @tool(
     "FileEditingTools",
+    tags=["file", "write", "edit"],
     name="write_file",
-    description="Create or overwrite a file with full content.",
+    description="Write or append text content to a file.",
 )
-def exec_write_file(file_path: str, content: str, append: bool = False) -> str:
-    """Write or append content to a file."""
+async def write_file(file_path: str, content: str, append: bool = False) -> str:
     mode = "a" if append else "w"
     try:
-        with open(file_path, mode, encoding="utf-8") as f:
+        async with aiofiles.open(file_path, mode, encoding="utf-8") as f:
             if content and not content.endswith("\n"):
                 content += "\n"
-            f.write(content)
-
+            await f.write(content)
         action = "Appended to" if append else "Wrote"
-        return (
-            f"{action} '{file_path}' "
-            f"({len(content)} characters, {content.count(chr(10)) + 1} lines)"
-        )
+        return f"{action} '{file_path}' ({len(content)} chars)"
     except Exception as e:
-        return f"Error writing file '{file_path}': {str(e)}"
+        return f"Error writing '{file_path}': {str(e)}"
 
 
 @tool(
     "FileEditingTools",
+    tags=["file", "edit"],
     name="replace_block",
-    description="Replace an exact block of text in a file; safe for LLM code edits.",
+    description="Replace exact text block inside a file.",
 )
-def exec_replace_block(
+async def replace_block(
     file_path: str, old_content: str, new_content: str, replace_all: bool = False
 ) -> str:
-    """Replace one or all occurrences of a text block in a file."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            text = f.read()
-
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            text = await f.read()
         count = text.count(old_content)
         if count == 0:
             return f"Error: old_content not found in '{file_path}'"
         if count > 1 and not replace_all:
-            return f"Error: old_content appears {count} times (not unique). Set replace_all=True to replace all occurrences."
-
+            return f"Error: old_content appears {count} times. Set replace_all=True."
         new_text = text.replace(old_content, new_content, count if replace_all else 1)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_text)
-
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+            await f.write(new_text)
         replaced = count if replace_all else 1
         return f"Replaced {replaced} occurrence(s) in '{file_path}'"
     except FileNotFoundError:
         return f"File not found: '{file_path}'"
     except Exception as e:
-        return f"Error during replace: {str(e)}"
-
-
-# ─────────────────────────────────────────────────────────────
-# File Reading Tools
-# ─────────────────────────────────────────────────────────────
+        return f"Error replacing in '{file_path}': {str(e)}"
 
 
 @tool(
     "FileEditingTools",
-    name="open_file_sync",
-    description="Read a file synchronously.",
+    tags=["file", "read"],
+    name="read_file",
+    description="Read full content of a text file.",
 )
-def open_file_sync(file_path: str) -> str:
-    """Read the content of a file synchronously."""
+async def read_file(file_path: str) -> str:
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return f"Error: File '{file_path}' not found."
-    except Exception as e:
-        return f"Error while reading file '{file_path}': {str(e)}"
-
-
-@tool(
-    "FileEditingTools",
-    name="open_file_async",
-    description="Read a file asynchronously.",
-)
-async def open_file_async(file_path: str) -> str:
-    """Read the content of a file asynchronously."""
-    try:
-        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+        async with aiofiles.open(
+            file_path, "r", encoding="utf-8", errors="ignore"
+        ) as f:
             return await f.read()
     except FileNotFoundError:
         return f"Error: File '{file_path}' not found."
     except Exception as e:
-        return f"Error while reading file '{file_path}': {str(e)}"
+        return f"Error reading '{file_path}': {str(e)}"
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "read", "pdf"],
+    name="read_pdf",
+    description="Extract all text from a PDF file.",
+)
+async def read_pdf(file_path: str) -> str:
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(file_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        return text.strip() or "No text extracted."
+    except Exception as e:
+        return f"Error reading PDF '{file_path}': {str(e)}"
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "read", "docx"],
+    name="read_docx",
+    description="Extract all text from a DOCX file.",
+)
+async def read_docx(file_path: str) -> str:
+    try:
+        from docx import Document
+
+        doc = Document(file_path)
+        text = "\n".join(para.text for para in doc.paragraphs)
+        return text.strip() or "No text extracted."
+    except Exception as e:
+        return f"Error reading DOCX '{file_path}': {str(e)}"
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "read", "image", "vision"],
+    name="read_image",
+    description="Describe image content using vision model.",
+)
+async def read_image(
+    agent, file_path: str, prompt: str = "Describe this image in detail."
+) -> str:
+    try:
+        if not os.path.isfile(file_path):
+            return f"Error: File '{file_path}' not found."
+        loop = asyncio.get_running_loop()
+
+        def _encode():
+            with Image.open(file_path) as img:
+                img.thumbnail((1024, 1024))
+                buffer = BytesIO()
+                img.save(buffer, format="PNG")
+                return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        base64_img = await loop.run_in_executor(None, _encode)
+        description = await agent.client.describe_image(
+            image_base64=base64_img, prompt=prompt
+        )
+        return f"Image description: {description}"
+    except Exception as e:
+        return f"Error processing image '{file_path}': {str(e)}"
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "folder", "read"],
+    name="read_folder",
+    description="Recursively read folder structure and content of text files.",
+)
+async def read_folder(
+    folder_path: str, recursive: bool = True, max_files: int = 30
+) -> str:
+    """Read folder and return structure + content preview of text files."""
+    if not os.path.isdir(folder_path):
+        return f"Error: Folder '{folder_path}' not found."
+
+    lines = [f"📂 Folder: {os.path.abspath(folder_path)}"]
+    files_read = 0
+
+    for root, dirs, files in os.walk(folder_path):
+        if not recursive:
+            dirs.clear()
+
+        rel_path = os.path.relpath(root, folder_path)
+        indent = "  " * (rel_path.count(os.sep) + 1) if rel_path != "." else "  "
+
+        if rel_path != ".":
+            lines.append(f"{indent}📁 {os.path.basename(root)}/")
+
+        for f in sorted(files):
+            file_path = os.path.join(root, f)
+            lines.append(f"{indent}📄 {f}")
+
+            # Read small text files for preview
+            if files_read < max_files and any(
+                f.lower().endswith(ext)
+                for ext in [
+                    ".txt",
+                    ".md",
+                    ".py",
+                    ".js",
+                    ".ts",
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".sh",
+                    ".html",
+                    ".css",
+                    ".c",
+                    ".cpp",
+                    ".go",
+                    ".rs",
+                ]
+            ):
+                try:
+                    content = await read_file(file_path)
+                    if content and not content.startswith("Error:"):
+                        preview = content.strip()[:300]
+                        if len(content) > 300:
+                            preview += "..."
+                        lines.append(f"{indent}   └─ Preview: {preview}")
+                        files_read += 1
+                except Exception:
+                    pass
+
+    return "\n".join(lines)

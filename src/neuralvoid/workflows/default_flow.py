@@ -32,7 +32,7 @@ def has_final_reply(state: AgentState, args=None):
 
 
 # ==================== LOOPS ====================
-@workflow.loop("chat_tool_loop", max_iterations=10, break_condition="has_final_reply")
+@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="has_final_reply")
 async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
     """Chat mode loop — waits for new user messages and runs simplified chat_loop"""
     while True:
@@ -90,7 +90,7 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
         agent.message_queue.task_done()
 
 
-@workflow.loop("agentic_loop", max_iterations=15, break_condition="subtask_complete")
+@workflow.loop("agentic_loop", max_iterations=50, break_condition="subtask_complete")
 async def agentic_loop(agent, state: AgentState):
     """Thin wrapper around the simplified agentic_loop"""
     async for ev, pl in agent.flow.executors.agentic_loop(0, state):

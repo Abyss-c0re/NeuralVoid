@@ -73,7 +73,10 @@ tools:
   # Just list each tool set by name
 # FastAssistant: {} # Expose client's method as a tool for agent
   FileEditingTools: {}
-  TerminalTools: {} # Default internal tool file: tools/terminal_set.py
+  TerminalTools: {}
+  CodingTools: {}
+  WebTools: {}
+   # Default internal tool file: tools/terminal_set.py
   #  external_set:
   #   folder: ~/mytools     # Optional external folder, auto-load all .py files
 workflows:
@@ -117,6 +120,8 @@ agents:
     tool_sets:
       - FileEditingTools
       - TerminalTools
+      - CodingTools
+      - WebTools
     workflow: orchestrator
 
   agent_002:
@@ -133,6 +138,8 @@ agents:
     tool_sets:
       - FileEditingTools
       - TerminalTools
+      - CodingTools
+      - WebTools
     workflow: deploy_chat
 
   sub_agent_002:
