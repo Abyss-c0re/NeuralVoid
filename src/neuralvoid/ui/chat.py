@@ -1,31 +1,25 @@
 import asyncio
 import json
 import time
+from typing import Optional, Any
 
-from typing import Optional, Union, Any
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Markdown
 from textual.containers import VerticalScroll
 from textual.binding import Binding
 
 from neuralcore.agents.core import Agent
-from neuralcore.actions.actions import ActionSet
-from neuralcore.actions.manager import DynamicActionManager
 
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
 from neuralvoid.ui.helpers import _build_tool_markdown
-
-
 from neuralcore.utils.logger import Logger
-
-ToolProvider = Union[ActionSet, DynamicActionManager, list[dict[str, Any]]]
 
 logger = Logger.get_logger()
 
 
 # ============================================================
-# Message widget – clean status footer (no iteration spam)
+# Message Widget
 # ============================================================
 
 
@@ -39,22 +33,19 @@ class Message(Markdown):
         super().__init__(self.render_markdown())
 
     def update_status(self, text: str) -> None:
-        """FORCE update on the main Textual thread."""
         self.status_line = text.strip()
 
         def _do_update():
             self.update(self.render_markdown())
-            self.refresh()  # widget
+            self.refresh()
             if self.app:
-                self.app.refresh(layout=True)  # full screen
-                self.app.call_later(self.refresh)  # next frame safety
+                self.app.refresh(layout=True)
+                self.app.call_later(self.refresh)
 
         if self.app:
             self.app.call_later(_do_update)
         else:
             _do_update()
-
-        logger.debug(f"[UI] STATUS UPDATED → {text[:60]}...")
 
     def clear_status(self) -> None:
         self.status_line = ""
@@ -80,7 +71,6 @@ class Message(Markdown):
             prefix = ""
 
         main = prefix + self.buffer
-
         if self.status_line:
             status = f"\n\n<span style='dim'>└─ {self.status_line}</span>"
             return main + status
@@ -88,14 +78,38 @@ class Message(Markdown):
 
 
 # ============================================================
-# Chat container
+# Chat Container
 # ============================================================
 
 
 class ChatView(VerticalScroll):
-    def add(self, widget):
+    """Chat container with reliable auto-scrolling, especially after final answer."""
+
+    def add(self, widget) -> None:
         self.mount(widget)
-        self.scroll_end()
+        self.call_after_refresh(self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self) -> None:
+        self.scroll_end(animate=False, immediate=True)
+        self.refresh(layout=True)
+
+    async def ensure_final_scroll(self) -> None:
+        """Aggressive final scroll - multiple attempts with delays for Markdown layout."""
+        for i in range(6):
+            self.scroll_end(animate=False, immediate=True)
+            self.refresh(layout=True)
+            if self.app:
+                self.app.refresh(layout=True)
+            await asyncio.sleep(0.02 + i * 0.01)
+
+    def on_child_update(self) -> None:
+        if self._should_auto_scroll():
+            self.call_after_refresh(self._scroll_to_bottom)
+
+    def _should_auto_scroll(self) -> bool:
+        if self.is_vertical_scrollbar_grabbed:
+            return False
+        return self.scroll_y >= self.max_scroll_y - 80
 
 
 # ============================================================
@@ -104,22 +118,19 @@ class ChatView(VerticalScroll):
 
 
 class LLMChatApp(App):
-    agent: Agent  # ← required by new queue-based Agent
+    agent: Agent
     system_prompt: Optional[str]
     waiting_for_confirmation: bool = False
     pending_confirmation: Optional[dict] = None
 
-    # Persistent agent runner (one single run() that lives forever)
     _agent_task: asyncio.Task | None = None
     _current_assistant_msg: Optional[Message] = None
 
-    # Per-turn buffers (reset on every new assistant message)
     _current_pure_text: str = ""
     _current_tool_buffer: str = ""
     _last_stream_update: float = 0.0
     _last_finished: bool = True
 
-    # UI constants
     UPDATE_INTERVAL = 0.08
     SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -193,20 +204,12 @@ class LLMChatApp(App):
             )
         )
 
-        # === NEW: Start the persistent queue-based agent runner once ===
-        self._agent_task = asyncio.create_task(
-            self._run_agent_forever(), name="agent-runner"
-        )
-
+        self._agent_task = asyncio.create_task(self.run_chat_loop(), name="chat-loop")
         self.query_one(Input).focus()
 
-    # In LLMChatApp class
+    # ====================== Persistent Agent Loop ======================
 
-    _agent_task: asyncio.Task | None = None
-    _current_assistant_msg: Optional[Message] = None
-
-    async def _run_agent_forever(self):
-        """Single persistent consumer with MAXIMUM UI forcing."""
+    async def run_chat_loop(self):
         try:
             async for event_type, payload in self.agent.run(
                 user_prompt=None,
@@ -215,7 +218,7 @@ class LLMChatApp(App):
                 max_tokens=self.max_tokens,
                 chat_mode=True,
             ):
-                logger.debug(f"[UI RUNNER] Received event: {event_type}")  # ← debug
+                logger.debug(f"[UI] Event: {event_type}")
 
                 if event_type in (
                     "content_delta",
@@ -230,9 +233,6 @@ class LLMChatApp(App):
                     self._current_tool_buffer = ""
                     self._last_finished = False
 
-                    self.chat.refresh(layout=True)
-                    self.refresh()
-
                 if self._current_assistant_msg is None:
                     continue
 
@@ -240,19 +240,19 @@ class LLMChatApp(App):
                     event_type, payload, self._current_assistant_msg
                 )
 
-                # Reset for next turn
                 if event_type in ("finish", "llm_response"):
                     self._last_finished = True
                     self._current_assistant_msg = None
 
         except asyncio.CancelledError:
-            logger.debug("Agent runner cancelled")
+            logger.debug("Chat loop cancelled")
         except Exception as e:
-            logger.exception("Agent runner crashed")
+            logger.exception("Chat loop crashed")
             self.chat.add(Message("system", f"❌ Runner error: {e}"))
 
+    # ====================== UI Update ======================
+
     async def _ui_update(self, message: Message, immediate: bool = False) -> None:
-        """Shared UI refresh helper (was _ui_update inside old stream_llm)."""
         now = time.time()
         if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
             return
@@ -264,21 +264,19 @@ class LLMChatApp(App):
         if message.buffer != display:
             message.buffer = display
             message.update(message.render_markdown())
-            self.chat.scroll_end(animate=False)
+            self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             self._last_stream_update = now
+
+    # ====================== Process Agent Events ======================
 
     async def _process_agent_event(
         self, event_type: str, payload: Any, message: Message
     ) -> None:
-        """Clean event handling for chat mode. Prevents double text from content_delta + llm_response."""
         level = self.tool_info_level or "compact"
-
-        # ── Phase changes ───────────────────────
 
         if event_type == "phase_changed":
             phase = payload.get("phase", "unknown").strip()
-            logger.debug(f"[UI] PHASE_CHANGED received: {phase}")  # ← debug
-
+            logger.debug(f"[UI] PHASE_CHANGED: {phase}")
             if self._current_assistant_msg:
                 spinner = self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]
                 self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
@@ -295,11 +293,9 @@ class LLMChatApp(App):
                     status_text = f"{spinner} {phase.upper()}"
 
                 self._current_assistant_msg.update_status(status_text)
-                self.chat.scroll_end(animate=False)
-                self.refresh()  # extra safety
+                self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
-        # ── Sub-task progression (NEW — this was missing) ─────────────────────
         elif event_type == "step_completed":
             summary = payload.get("summary", "") or str(payload)
             self._current_pure_text += f"\n✅ **Step completed**\n{summary}\n\n"
@@ -312,7 +308,6 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        # ── Planning phase ─────────────────────────────────────
         elif event_type == "planning_complete":
             steps = payload.get("steps", [])
             goal = payload.get("goal", "")
@@ -325,24 +320,20 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        # ── Streaming assistant content ──────────────────────────────
         elif event_type == "content_delta":
             self._current_pure_text += payload
             await self._ui_update(message)
             return
 
-        # ── Final LLM Response (KEY FIX: Replace deltas with clean final reply) ──
         elif event_type == "llm_response":
             full_reply = payload.get("full_reply", "").strip()
             if full_reply:
-                # Replace accumulated content_delta text with the final clean reply
-                # This prevents double text in chat mode
                 self._current_pure_text = full_reply
                 await self._ui_update(message, immediate=True)
-                message.clear_status()  # remove spinner
+                message.clear_status()
+                self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
-        # ── Tool call delta (streaming args) ─────────────────────────
         elif event_type == "tool_call_delta":
             func = payload.get("function", {})
             name = func.get("name") or payload.get("name") or "unknown"
@@ -370,13 +361,11 @@ class LLMChatApp(App):
             self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
             return
 
-        # ── Tool batch start ─────────────────────────────────────────
         elif event_type == "tool_calls":
             count = len(payload) if isinstance(payload, (list, tuple)) else "?"
             message.update_status(f"Executing {count} tool(s)...")
             return
 
-        # ── Tool start ─────────────────────
         elif event_type == "tool_start":
             name = payload.get("name", "unknown")
             args = payload.get("args", {})
@@ -392,7 +381,6 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        # ── Tool result ──────────────────────────────────────────────
         elif event_type == "tool_result":
             name = payload.get("name", "unknown")
             result = str(payload.get("result", ""))
@@ -412,7 +400,6 @@ class LLMChatApp(App):
             message.update_status(f"Tool **{name}** {status}")
             return
 
-        # ── Confirmation required ──────────────────
         elif event_type == "needs_confirmation":
             tool_name = payload.get("name", "unknown")
             md = _build_tool_markdown(
@@ -430,7 +417,6 @@ class LLMChatApp(App):
             self.waiting_for_confirmation = True
             return
 
-        # ── Reflection ───────────────────────────────────────────────
         elif event_type == "reflection_triggered":
             self._current_pure_text += (
                 f"\n\n🤔 **Self-Reflection**\n{payload.strip()}\n\n"
@@ -438,24 +424,21 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        # ── Final summary report ─────────────────────────────────────
         elif event_type == "final_summary":
             self._current_pure_text += f"\n\n{payload}\n"
             await self._ui_update(message, immediate=True)
             return
 
-        # ── Finish signal ────────────────────────────────────────────
+        # ====================== FINAL ANSWER - STRONG SCROLL FIX ======================
         elif event_type == "finish":
             reason = payload.get("reason", "unknown")
 
             if reason == "casual_complete":
                 self._current_pure_text = self._current_pure_text.strip()
-            else:
-                if self._current_tool_buffer.strip():
-                    self._current_tool_buffer = (
-                        "\n\n─── 🔧 Tool usage history ───\n\n"
-                        + self._current_tool_buffer
-                    )
+            elif self._current_tool_buffer.strip():
+                self._current_tool_buffer = (
+                    "\n\n─── 🔧 Tool usage history ───\n\n" + self._current_tool_buffer
+                )
 
             await self._ui_update(message, immediate=True)
 
@@ -469,13 +452,14 @@ class LLMChatApp(App):
 
             message.clear_status()
 
-            # Reset for next turn
+            # Aggressive scroll for final answer
+            await self.chat.ensure_final_scroll()
+
             self._current_assistant_msg = None
             self._current_pure_text = ""
             self._current_tool_buffer = ""
             return
 
-        # ── Errors / cancellations / warnings ────────────────────────
         elif event_type in ("cancelled", "error", "warning"):
             icon = {"cancelled": "🛑", "error": "❌", "warning": "⚠️"}.get(
                 event_type, "⚠️"
@@ -492,7 +476,8 @@ class LLMChatApp(App):
                 self._current_tool_buffer = ""
             return
 
-    # ==================== CONFIRMATION (still needed for dangerous tools) ====================
+    # ====================== Confirmation Handler ======================
+
     async def _handle_confirmation_response(self, user_input: str) -> bool:
         if not self.waiting_for_confirmation or not self.pending_confirmation:
             return False
@@ -505,7 +490,6 @@ class LLMChatApp(App):
         args = info["args"]
         action = info["action"]
         assistant_msg = info["assistant_msg"]
-        original_tool_calls = info.get("tool_calls", [])
 
         if approved:
             try:
@@ -520,10 +504,9 @@ class LLMChatApp(App):
         else:
             content = "User denied the action."
 
-        # === NEW: Tell the running workflow via control instead of restarting a stream ===
         await self.agent.post_control(
             {
-                "event": "needs_confirmation",  # workflow recognises this as confirmation response
+                "event": "needs_confirmation",
                 "approved": approved,
                 "content": content,
                 "tool_call_id": tool_call_id,
@@ -534,15 +517,14 @@ class LLMChatApp(App):
         feedback = f"→ Action **{name}** was {'approved' if approved else 'denied'}.\nResult: {content}"
         assistant_msg.buffer += f"\n\n{feedback}"
         assistant_msg.update(assistant_msg.render_markdown())
-        self.chat.scroll_end()
+        await self.chat.ensure_final_scroll()
 
         self.waiting_for_confirmation = False
         self.pending_confirmation = None
-
-        # No more stream_llm restart – the persistent runner continues automatically
         return True
 
-    # ==================== USER INPUT ====================
+    # ====================== User Input ======================
+
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
         event.input.value = ""
@@ -563,33 +545,25 @@ class LLMChatApp(App):
         if await self._handle_confirmation_response(value):
             return
 
-        # Always show the user message immediately
         self.chat.add(Message("user", value))
         self.conversation.append({"role": "user", "content": value})
 
-        # Create fresh assistant message for this turn
         assistant_msg = Message("assistant", "")
         self.chat.add(assistant_msg)
 
-        # Reset per-turn buffers
         self._current_assistant_msg = assistant_msg
         self._current_pure_text = ""
         self._current_tool_buffer = ""
 
-        # === NEW: Communicate via queue instead of calling run() with a prompt ===
         await self.agent.post_message(value)
 
-    # ==================== STOP / CANCEL ====================
     async def action_stop_stream(self) -> None:
         if self._current_assistant_msg is None:
             self.notify("No active generation to stop.", timeout=2.5)
             return
-
-        # Tell the running workflow via control (Workflow._drain_control will pick it up)
         await self.agent.post_control({"event": "cancelled"})
         self.notify("🛑 Generation cancelled", severity="warning", timeout=4)
 
-    # ==================== CLEAR CHAT ====================
     async def action_clear_chat(self):
         self.chat.remove_children()
         self.conversation.clear()
