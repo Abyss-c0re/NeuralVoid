@@ -23,6 +23,14 @@ def subtask_complete(state: AgentState, args=None):
 
 @workflow.condition("goal_achieved")
 def goal_achieved(state: AgentState, args=None):
+    """Break ONLY on real task completion.
+    Casual chat stays in the loop forever (multi-turn)."""
+
+    # ── NEW: Casual mode = never break here ──
+    if getattr(state, "mode", None) == "casual":
+        return False
+
+    # Original logic for TASK completion
     return getattr(state, "is_complete", False) and not any(
         w in str(getattr(state, "full_reply", "")).lower()
         for w in ["error", "failed", "try again"]
