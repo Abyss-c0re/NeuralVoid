@@ -17,25 +17,32 @@ logger = Logger.get_logger()
 # ==================== CONDITIONS ====================
 @workflow.condition("subtask_complete")
 def subtask_complete(state: AgentState, args=None):
-    """Break condition for agentic_loop"""
-    return getattr(state, "is_complete", False)
+    """Break ONLY after real work (tools used + final reply)."""
+    is_complete = getattr(state, "is_complete", False)
+    has_reply = bool(getattr(state, "full_reply", "").strip())
+    has_executed = bool(getattr(state, "executed_functions", []) or getattr(state, "tool_results", []))
+    return is_complete and has_reply and has_executed
 
 
 @workflow.condition("goal_achieved")
 def goal_achieved(state: AgentState, args=None):
-    """Break ONLY on real task completion.
-    Casual chat stays in the loop forever (multi-turn)."""
+    """Break ONLY on real task completion in non-casual mode.
+    Casual chat and ongoing conversations should NEVER break here."""
 
-    # ── NEW: Casual mode = never break here ──
+    # Never break in casual mode
     if getattr(state, "mode", None) == "casual":
         return False
 
-    # Original logic for TASK completion
-    return getattr(state, "is_complete", False) and not any(
-        w in str(getattr(state, "full_reply", "")).lower()
-        for w in ["error", "failed", "try again"]
+    # Only break if we have a real final answer AND it was a TASK
+    full_reply = getattr(state, "full_reply", "").strip()
+    is_complete = getattr(state, "is_complete", False)
+
+    # Stronger check: require actual content + no error signals
+    has_real_content = len(full_reply) > 20 and not any(
+        w in full_reply.lower() for w in ["error", "failed", "try again", "no output"]
     )
 
+    return is_complete and has_real_content
 
 @workflow.condition("has_final_reply")
 def has_final_reply(state: AgentState, args=None):
@@ -199,7 +206,7 @@ class AgentFlow:
 
         self.engine._log_iteration_state(iteration, state)
 
-    # ==================== ORCHESTRATOR (100% unchanged) ====================
+    # ==================== ORCHESTRATOR ====================
 
     @workflow.set("orchestrator", name="plan_microtasks")
     async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
@@ -209,56 +216,91 @@ class AgentFlow:
         state.phase = self.Phase.PLAN
         yield ("phase_changed", {"phase": "plan"})
 
-        prompt = f"""Break this task into 4-8 small independent micro-tasks.
+        prompt = f"""Break this task into 5-8 small focused micro-tasks.
 
         TASK: {self.agent.task}
 
-        For each micro-task suggest the most relevant tools (e.g. open_file_async, write_file, grep, replace_block, etc.).
-
-        Return ONLY JSON:
+        Return ONLY valid JSON in this exact format:
         {{
         "microtasks": [
-            {{"description": "...", "suggested_tools": ["tool1", "tool2"]}},
-            ...
+            {{
+            "description": "Clear one-sentence description",
+            "suggested_tools": ["tool1", "tool2"],
+            "depends_on": null
+            }},
+            {{
+            "description": "...",
+            "suggested_tools": ["tool3"],
+            "depends_on": "step_1"     # use previous description as reference or null
+            }}
         ]
-        }}"""
+        }}
+
+        Note: Use "depends_on": null for tasks that can start immediately.
+        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
 
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
+
         try:
             data = json.loads(raw)
-            state.planned_tasks = [t["description"] for t in data.get("microtasks", [])]
-            state.task_tool_assignments = {
-                i: t.get("suggested_tools", [])
-                for i, t in enumerate(data.get("microtasks", []))
-            }
-        except Exception:
+            microtasks = data.get("microtasks", [])
+
+            state.planned_tasks.clear()
+            state.task_tool_assignments.clear()
+            state.task_dependencies.clear()
+
+            for i, task in enumerate(microtasks):
+                state.planned_tasks.append(task.get("description", f"Task {i + 1}"))
+                state.task_tool_assignments[i] = task.get("suggested_tools", [])
+                state.task_dependencies[i] = task.get(
+                    "depends_on"
+                )  # can be None or string
+
+            state.current_task_index = 0
+            state.task_id_map.clear()
+
+            yield (
+                "info",
+                f"Planned {len(state.planned_tasks)} micro-tasks with dependencies",
+            )
+
+        except Exception as e:
+            logger.warning(f"Planning failed: {e}. Using single task fallback.")
             state.planned_tasks = [self.agent.task]
             state.task_tool_assignments = {0: []}
-
-        state.current_task_index = 0
-        state.task_id_map = {}
-        yield (
-            "info",
-            f"Planned {len(state.planned_tasks)} micro-tasks with tool hints",
-        )
+            state.task_dependencies = {0: None}
+            state.current_task_index = 0
 
     @workflow.set("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
+        """Launch tasks whose dependencies are satisfied (or have no dependency)."""
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
 
-        tasks_to_launch = list(
-            enumerate(
-                state.planned_tasks[state.current_task_index :],
-                start=state.current_task_index,
-            )
-        )
+        launched_this_round = 0
 
-        launched_ids = []
+        for idx in range(state.current_task_index, len(state.planned_tasks)):
+            depends_on = state.task_dependencies.get(idx)
 
-        for idx, task_desc in tasks_to_launch:
+            # Skip if dependency not yet satisfied
+            if depends_on and depends_on not in (None, "null", ""):
+                dependency_satisfied = False
+                for prev_idx in range(idx):
+                    prev_task_id = state.task_id_map.get(prev_idx)
+                    if prev_task_id:
+                        prev_status = self.agent.sub_tasks.get(prev_task_id, {}).get(
+                            "status"
+                        )
+                        if prev_status == "completed":
+                            dependency_satisfied = True
+                            break
+                if not dependency_satisfied:
+                    continue  # wait for dependency
+
+            # Launch this task
             assigned_tools = state.task_tool_assignments.get(idx, [])
+            task_desc = state.planned_tasks[idx]
             name = f"Step {idx + 1}/{len(state.planned_tasks)}: {task_desc[:55]}..."
 
             task_id = await self.agent.start_complex_deployment(
@@ -269,18 +311,11 @@ class AgentFlow:
                 custom_system_prompt=self._build_sub_agent_system_prompt(
                     task_desc, assigned_tools
                 ),
+                depends_on=depends_on if depends_on not in (None, "null", "") else None,
             )
 
-            wait_time = 0.0
-            while task_id not in self.agent.sub_tasks and wait_time < 5.0:
-                await asyncio.sleep(0.05)
-                wait_time += 0.05
-
-            if task_id not in self.agent.sub_tasks:
-                logger.warning(f"Task {task_id} not registered in sub_tasks after 5s.")
-
-            launched_ids.append(task_id)
             state.task_id_map[idx] = task_id
+            launched_this_round += 1
 
             if task_id in self.agent.sub_tasks:
                 self.agent.sub_tasks[task_id]["step_number"] = idx + 1
@@ -292,21 +327,29 @@ class AgentFlow:
                     "task_id": task_id,
                     "description": task_desc,
                     "assigned_tools": assigned_tools,
+                    "depends_on": depends_on,
                 },
             )
             logger.info(
-                f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
+                f"Launched sub-task {idx + 1} → {task_id} (depends_on={depends_on})"
             )
 
-        state.sub_task_ids = launched_ids
-        state.current_task_index = len(state.planned_tasks)
+        # Advance the index
+        state.current_task_index += launched_this_round
 
     @workflow.set("orchestrator", name="wait_for_subtask")
     async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
-        if not state.sub_task_ids:
+        """Wait for currently launched sub-tasks to complete."""
+        if not state.task_id_map:
             return
 
-        pending_tasks = set(state.sub_task_ids)
+        # Get all currently launched but not yet completed task IDs
+        pending_tasks = {
+            task_id
+            for task_id in state.task_id_map.values()
+            if self.agent.sub_tasks.get(task_id, {}).get("status")
+            not in ("completed", "failed", "cancelled")
+        }
 
         while pending_tasks:
             for task_id in list(pending_tasks):
@@ -319,14 +362,27 @@ class AgentFlow:
                     pending_tasks.remove(task_id)
                 else:
                     yield ("waiting_for_subtask", {"task_id": task_id})
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
-        state.sub_task_ids = []
-        state.current_task_index = len(state.planned_tasks)
+        # Do NOT force current_task_index to the end here — let launch logic control it
+        # state.sub_task_ids = []   ← removed because we now use task_id_map
 
     @workflow.set("orchestrator", name="check_orchestrator_complete")
     async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
+        """Check if all planned tasks have been launched and completed."""
+        # All tasks must have been launched
         if state.current_task_index < len(state.planned_tasks):
+            state.is_complete = False
+            return
+
+        # All launched tasks must be finished
+        all_done = all(
+            self.agent.sub_tasks.get(tid, {}).get("status")
+            in ("completed", "failed", "cancelled")
+            for tid in state.task_id_map.values()
+        )
+
+        if not all_done:
             state.is_complete = False
             return
 
