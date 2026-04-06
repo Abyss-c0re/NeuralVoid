@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Optional
 
 from neuralcore.agents.core import Agent
+from neuralvoid.bridge.web import HeadlessWebSocketBridge
 
 
 class HeadlessAgentRunner:
     """
-    Fully updated headless runner (March 2026) — now using the new Agent class.
-    Features preserved: cooperative cancellation, graceful shutdown, status/PID files,
-    accurate success detection, clean event handling.
+    Headless runner with bidirectional WebSocket support.
+    Uses agent.run(chat_mode=False) as requested.
+    All custom communication lives in NeuralVoid.
     """
 
     def __init__(
@@ -24,11 +25,13 @@ class HeadlessAgentRunner:
         agent: Agent,
         status_file: str | Path = "/tmp/agent.status.json",
         pid_file: str | Path = "/tmp/agent.pid",
+        websocket_port: int = 8765,
         status_update_throttle_sec: float = 1.0,
     ):
         self.agent = agent
         self.status_path = Path(status_file).resolve()
         self.pid_path = Path(pid_file).resolve()
+        self.websocket_port = websocket_port
         self.throttle_sec = status_update_throttle_sec
 
         self._last_status_write: float = 0.0
@@ -37,9 +40,11 @@ class HeadlessAgentRunner:
         self._start_time: Optional[datetime] = None
 
         self._stop_event: Optional[asyncio.Event] = None
+        self._bridge: Optional[HeadlessWebSocketBridge] = None
+        self._bridge_task: Optional[asyncio.Task] = None
 
     # ============================================================
-    # Status / PID (unchanged)
+    # Status / PID
     # ============================================================
 
     def _write_status(
@@ -63,9 +68,7 @@ class HeadlessAgentRunner:
         data = {
             "pid": os.getpid(),
             "status": status,
-            "started_at": self._start_time.isoformat() + "Z"
-            if self._start_time
-            else None,
+            "started_at": self._start_time.isoformat() + "Z" if self._start_time else None,
             "last_update": now.isoformat() + "Z",
             "prompt": prompt,
             "current_iteration": iteration,
@@ -98,7 +101,7 @@ class HeadlessAgentRunner:
                 pass
 
     # ============================================================
-    # Signals (unchanged)
+    # Signals
     # ============================================================
 
     def _setup_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -109,11 +112,7 @@ class HeadlessAgentRunner:
             if self._stop_event:
                 self._stop_event.set()
 
-            self._write_status(
-                "shutting_down",
-                message="Received shutdown signal",
-                force=True,
-            )
+            self._write_status("shutting_down", message="Received shutdown signal", force=True)
 
             for task in asyncio.all_tasks(loop):
                 if task is not asyncio.current_task():
@@ -123,7 +122,7 @@ class HeadlessAgentRunner:
             loop.add_signal_handler(sig, shutdown_handler, sig)
 
     # ============================================================
-    # Main run – now uses Agent instead of AgentRunner
+    # Main run with bidirectional WebSocket
     # ============================================================
 
     async def run(
@@ -143,7 +142,7 @@ class HeadlessAgentRunner:
         loop = asyncio.get_running_loop()
         self._setup_signal_handlers(loop)
 
-        # ── PID safety ─────────────────────────────────────────────
+        # PID safety
         if self.pid_path.exists():
             try:
                 old_pid = int(self.pid_path.read_text().strip())
@@ -157,24 +156,37 @@ class HeadlessAgentRunner:
         self._write_pid()
         self._write_status("starting", prompt=prompt, force=True)
 
-        # ── Create the new Agent instance ──────────────────────────
+        # === Start bidirectional WebSocket bridge ===
+        self._bridge = HeadlessWebSocketBridge(
+            agent=self.agent,
+            host="127.0.0.1",
+            port=self.websocket_port,
+        )
+        self._bridge_task = asyncio.create_task(self._bridge.start())
 
         current_iteration = 0
         current_phase = "idle"
 
         try:
+            # Use run(chat_mode=False) as you requested
             async for event_type, payload in self.agent.run(
                 user_prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.3,
                 max_tokens=max_tokens,
+                chat_mode=False,
                 stop_event=self._stop_event,
             ):
                 if self._stop_event.is_set():
                     print("\n🛑 Stop event received")
                     break
 
-                # ── Phase tracking (new in Agent) ──────────────────
+                # Forward important events to WebSocket via the hook
+                if event_type in ("tool_result", "final_answer", "finish", "error",
+                                  "phase_changed", "planning_complete"):
+                    await self.agent.on_background_event(event_type, payload)
+
+                # ── Local console + status file handling (unchanged) ──
                 if event_type == "phase_changed":
                     current_phase = payload.get("phase", current_phase)
                     self._write_status(
@@ -186,27 +198,20 @@ class HeadlessAgentRunner:
                     )
                     print(f"\n→ Phase: {current_phase.upper()}")
 
-                # ── Planning complete (new) ────────────────────────
                 elif event_type == "planning_complete":
                     steps = payload.get("steps", [])
                     goal = payload.get("goal", "")
                     print(f"\n📋 Planning complete | Goal: {goal}")
-                    print("Steps:")
                     for i, step in enumerate(steps, 1):
                         print(f"  {i}. {step}")
 
-                # ── Iteration start ────────────────────────────────
                 elif event_type == "step_start":
                     current_iteration = payload.get("iteration", current_iteration)
-                    print(
-                        f"\n[{current_iteration}] Iteration start (phase: {current_phase})"
-                    )
+                    print(f"\n[{current_iteration}] Iteration start (phase: {current_phase})")
 
-                # ── Streaming content ──────────────────────────────
                 elif event_type == "content_delta":
                     print(payload, end="", flush=True)
 
-                # ── Tool lifecycle ─────────────────────────────────
                 elif event_type == "tool_start":
                     name = payload.get("name", "unknown")
                     args = payload.get("args", {})
@@ -225,12 +230,8 @@ class HeadlessAgentRunner:
                     result = str(payload.get("result", ""))
                     if payload.get("error"):
                         print(f"\n❌ {name} failed: {result[:300]}...")
-                        self._write_status(
-                            "error",
-                            iteration=current_iteration,
-                            phase=current_phase,
-                            error=result[:300],
-                        )
+                        self._write_status("error", iteration=current_iteration,
+                                           phase=current_phase, error=result[:300])
                     else:
                         print(f"\n✅ {name} → {result[:300]}...")
                         self._write_status(
@@ -250,15 +251,12 @@ class HeadlessAgentRunner:
                     count = len(payload) if isinstance(payload, list) else "?"
                     print(f"\nCalling {count} tool(s)...")
 
-                # ── Reflection ─────────────────────────────────────
                 elif event_type == "reflection_triggered":
                     print("\n🤔 Reflection:\n", str(payload).strip())
 
-                # ── Final summary ──────────────────────────────────
                 elif event_type == "final_summary":
                     print("\n📊 FINAL REPORT\n", str(payload).strip())
 
-                # ── Finish ─────────────────────────────────────────
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
                     print(f"\n🏁 Finished: {reason}")
@@ -270,18 +268,14 @@ class HeadlessAgentRunner:
                     elif reason == "reflection_stuck":
                         print("⚠️ Agent stuck in reflection loop")
 
-                # ── Confirmation (headless → log only) ─────────────
                 elif event_type == "needs_confirmation":
-                    print(
-                        "\n⚠️ Confirmation required for dangerous tool (skipped in headless mode)"
-                    )
+                    print("\n⚠️ Confirmation required (skipped in headless mode)")
                     self._write_status(
                         "needs_confirmation",
                         message="Dangerous tool requires user confirmation",
                         force=True,
                     )
 
-                # ── Errors / cancel / warnings ─────────────────────
                 elif event_type == "cancelled":
                     print(f"\n🛑 Cancelled: {payload}")
                     self._write_status("cancelled", message=str(payload), force=True)
@@ -310,16 +304,19 @@ class HeadlessAgentRunner:
         finally:
             self._running = False
 
+            # Gracefully stop WebSocket bridge
+            if self._bridge:
+                await self._bridge.stop()
+            if self._bridge_task and not self._bridge_task.done():
+                self._bridge_task.cancel()
+
+            # Final status
             if self._success:
                 self._write_status("success", force=True)
             else:
                 try:
                     current = json.loads(self.status_path.read_text())
-                    if current.get("status") not in (
-                        "error",
-                        "cancelled",
-                        "shutting_down",
-                    ):
+                    if current.get("status") not in ("error", "cancelled", "shutting_down"):
                         self._write_status("failed", force=True)
                 except Exception:
                     self._write_status("failed", force=True)
