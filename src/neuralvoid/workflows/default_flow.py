@@ -15,34 +15,47 @@ logger = Logger.get_logger()
 
 
 # ==================== CONDITIONS ====================
-@workflow.condition("subtask_complete")
-def subtask_complete(state: AgentState, args=None):
-    """Break ONLY after real work (tools used + final reply)."""
-    is_complete = getattr(state, "is_complete", False)
-    has_reply = bool(getattr(state, "full_reply", "").strip())
-    has_executed = bool(getattr(state, "executed_functions", []) or getattr(state, "tool_results", []))
-    return is_complete and has_reply and has_executed
-
-
 @workflow.condition("goal_achieved")
 def goal_achieved(state: AgentState, args=None):
-    """Break ONLY on real task completion in non-casual mode.
-    Casual chat and ongoing conversations should NEVER break here."""
-
-    # Never break in casual mode
+    """Break when we have a real final answer (explicit flag OR marker)."""
     if getattr(state, "mode", None) == "casual":
         return False
 
-    # Only break if we have a real final answer AND it was a TASK
     full_reply = getattr(state, "full_reply", "").strip()
     is_complete = getattr(state, "is_complete", False)
 
-    # Stronger check: require actual content + no error signals
+    # The marker is defined in AgentFlow
+    marker = "[FINAL_ANSWER_COMPLETE]"
+
+    has_marker = marker in full_reply
     has_real_content = len(full_reply) > 20 and not any(
-        w in full_reply.lower() for w in ["error", "failed", "try again", "no output"]
+        w in full_reply.lower() for w in ["error", "failed", "try again"]
     )
 
-    return is_complete and has_real_content
+    # ← Added debug logging (client-specific, belongs in NeuralVoid)
+    # logger.debug(
+    #     f"[CONDITION goal_achieved] evaluated → "
+    #     f"is_complete={is_complete}, "
+    #     f"has_marker={has_marker}, "
+    #     f"has_real_content={has_real_content}, "
+    #     f"full_reply_len={len(full_reply)}, "
+    #     f"mode={getattr(state, 'mode', None)}"
+    # )
+
+    return (is_complete or has_marker) and has_real_content
+
+
+@workflow.condition("subtask_complete")
+def subtask_complete(state: AgentState, args=None):
+    """Break when sub-task is really done."""
+    is_complete = getattr(state, "is_complete", False)
+    full_reply = getattr(state, "full_reply", "").strip()
+
+    marker = "[FINAL_ANSWER_COMPLETE]"
+    has_marker = marker in full_reply
+
+    return is_complete or has_marker
+
 
 @workflow.condition("has_final_reply")
 def has_final_reply(state: AgentState, args=None):
@@ -122,8 +135,6 @@ async def agentic_loop(agent, state: AgentState):
 
 # ==================== MAIN FLOWS ====================
 class AgentFlow:
-    FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
-
     class Phase(str, Enum):
         IDLE = "idle"
         CHAT = "chat"
@@ -137,19 +148,31 @@ class AgentFlow:
         self.engine = agent.workflow
         self.executors = AgentExecutors(agent, self.Phase)
         self.agent.flow = self
+        self.FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
         workflow.bind_to_engine(self.engine, instance=self)
 
     # ==================== SYSTEM PROMPTS ====================
+
+    def _inject_final_answer_instruction(self, base_prompt: str) -> str:
+        """Strong, consistent instruction for all prompts."""
+        return f"""{base_prompt}
+
+    CRITICAL FINAL ANSWER RULE:
+    When you have **fully completed** the assigned task/micro-task and verified all required outputs, you MUST end your response with **exactly** this marker on its own line:
+
+    {self.FINAL_ANSWER_MARKER}
+
+    Do not add anything after the marker. Use it only when the goal is 100% achieved."""
+
+    # === UPDATED PROMPTS ===
     def _build_chat_system_prompt(self) -> str:
-        return f"""You are a helpful Deploy Agent that executes commands **immediately**.
+        base = f"""You are a helpful Deploy Agent that executes commands immediately.
 
-        RULES (follow strictly):
+        RULES:
         - Use tool browser to load missing tools.
-        - Only for genuinely complex/multi-step requests should you plan or call DeploySubAgent.
-        - Keep responses short and natural after the tool result.
-        - Current goal: {self.agent.goal or "General assistance"}
-
-        Speak concisely and act fast."""
+        - Keep responses short and natural after tool results.
+        - Current goal: {self.agent.goal or "General assistance"}"""
+        return self._inject_final_answer_instruction(base)
 
     def _build_sub_agent_system_prompt(
         self, task_desc: str, assigned_tools: List[str]
@@ -159,15 +182,15 @@ class AgentFlow:
             if assigned_tools
             else ""
         )
-        return f"""You are a precise sub-agent executing **ONE single micro-task only**.
+        base = f"""You are a precise sub-agent executing **ONE single micro-task only**.
 
-        TASK: {task_desc}{tools_hint}
+    TASK: {task_desc}{tools_hint}
 
-        CRITICAL RULES:
-        - Complete ONLY this exact task.
-        - If the task involves reading a file, use open_file_async or open_file_sync directly.
-        - When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
-        - Never mention other steps or the overall project."""
+    CRITICAL RULES:
+    - Complete ONLY this exact task.
+    - If the task involves reading a file, use open_file_async or open_file_sync directly.
+    - When you have finished the task, output a short summary and end with exactly: {self.FINAL_ANSWER_MARKER}"""
+        return self._inject_final_answer_instruction(base)
 
     # ==================== WORKFLOWS ====================
     @workflow.set("deploy_chat", name="deploy_chat_loop")
@@ -238,8 +261,9 @@ class AgentFlow:
 
         Note: Use "depends_on": null for tasks that can start immediately.
         Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
-
+        print("AAA")
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
+        print("UFF")
 
         try:
             data = json.loads(raw)
@@ -443,3 +467,63 @@ class AgentFlow:
 
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
         return "✅ Sub-task completed.\n\nKey results recorded in shared context."
+
+    async def _ensure_subtasks_planned(self, state: AgentState, original_query: str):
+        """Ensure we have a proper LLM-generated plan.
+        Reuses the exact same planning logic as the orchestrator."""
+        if getattr(state, "planned_tasks", None) and len(state.planned_tasks) > 0:
+            logger.debug("Subtasks already planned — skipping")
+            return
+
+        state.phase = self.Phase.PLAN
+        yield ("phase_changed", {"phase": "plan"})
+
+        prompt = f"""Break this task into 5-8 small focused micro-tasks.
+
+        TASK: {original_query}
+
+        Return ONLY valid JSON in this exact format:
+        {{
+        "microtasks": [
+            {{
+            "description": "Clear one-sentence description",
+            "suggested_tools": ["tool1", "tool2"],
+            "depends_on": null
+            }},
+            ...
+        ]
+        }}
+
+        Note: Use "depends_on": null for tasks that can start immediately.
+        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
+
+        raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
+
+        try:
+            data = json.loads(raw)
+            microtasks = data.get("microtasks", [])
+
+            state.planned_tasks.clear()
+            state.task_tool_assignments.clear()
+            state.task_dependencies.clear()
+
+            for i, task in enumerate(microtasks):
+                state.planned_tasks.append(task.get("description", f"Task {i + 1}"))
+                state.task_tool_assignments[i] = task.get("suggested_tools", [])
+                state.task_dependencies[i] = task.get("depends_on")
+
+            state.current_task_index = 0
+            state.task_id_map.clear()
+
+            logger.info(f"[PLAN] LLM planned {len(state.planned_tasks)} micro-tasks")
+            yield (
+                "info",
+                f"Planned {len(state.planned_tasks)} micro-tasks with dependencies",
+            )
+
+        except Exception as e:
+            logger.warning(f"Planning failed: {e}. Using single task fallback.")
+            state.planned_tasks = [original_query]
+            state.task_tool_assignments = {0: []}
+            state.task_dependencies = {0: None}
+            state.current_task_index = 0
