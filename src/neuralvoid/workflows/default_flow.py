@@ -261,9 +261,8 @@ class AgentFlow:
 
         Note: Use "depends_on": null for tasks that can start immediately.
         Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
-        print("AAA")
+
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
-        print("UFF")
 
         try:
             data = json.loads(raw)
