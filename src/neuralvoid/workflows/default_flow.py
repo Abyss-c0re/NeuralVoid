@@ -75,7 +75,7 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
         try:
             raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
-            if getattr(agent, "_stop_event", None) and agent._stop_event.is_set():
+            if getattr(agent, "_stop_event", None) and agent._stop_event.is_step():
                 break
             continue
         except asyncio.CancelledError:
@@ -193,7 +193,7 @@ class AgentFlow:
         return self._inject_final_answer_instruction(base)
 
     # ==================== WORKFLOWS ====================
-    @workflow.set("deploy_chat", name="deploy_chat_loop")
+    @workflow.step("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
         """Persistent chat mode"""
         if iteration == 0:
@@ -204,7 +204,7 @@ class AgentFlow:
         while True:
             if (
                 getattr(self.agent, "_stop_event", None)
-                and self.agent._stop_event.is_set()
+                and self.agent._stop_event.is_step()
             ):
                 yield ("cancelled", "User requested stop")
                 break
@@ -216,7 +216,7 @@ class AgentFlow:
 
             await asyncio.sleep(0.01)  # prevent tight CPU loop
 
-    @workflow.set("sub_agent_execute", name="llm_stream")
+    @workflow.step("sub_agent_execute", name="llm_stream")
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
         async for ev, pl in self.agent.execute_loop(
             "agentic_loop", initial_state=state
@@ -231,7 +231,7 @@ class AgentFlow:
 
     # ==================== ORCHESTRATOR ====================
 
-    @workflow.set("orchestrator", name="plan_microtasks")
+    @workflow.step("orchestrator", name="plan_microtasks")
     async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
         if state.planned_tasks:  # already planned
             return
@@ -261,9 +261,8 @@ class AgentFlow:
 
         Note: Use "depends_on": null for tasks that can start immediately.
         Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
-        print("AAA")
+
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
-        print("UFF")
 
         try:
             data = json.loads(raw)
@@ -295,7 +294,7 @@ class AgentFlow:
             state.task_dependencies = {0: None}
             state.current_task_index = 0
 
-    @workflow.set("orchestrator", name="launch_next_subtask")
+    @workflow.step("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
         """Launch tasks whose dependencies are satisfied (or have no dependency)."""
         if state.current_task_index >= len(state.planned_tasks):
@@ -361,7 +360,7 @@ class AgentFlow:
         # Advance the index
         state.current_task_index += launched_this_round
 
-    @workflow.set("orchestrator", name="wait_for_subtask")
+    @workflow.step("orchestrator", name="wait_for_subtask")
     async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
         """Wait for currently launched sub-tasks to complete."""
         if not state.task_id_map:
@@ -391,7 +390,7 @@ class AgentFlow:
         # Do NOT force current_task_index to the end here — let launch logic control it
         # state.sub_task_ids = []   ← removed because we now use task_id_map
 
-    @workflow.set("orchestrator", name="check_orchestrator_complete")
+    @workflow.step("orchestrator", name="check_orchestrator_complete")
     async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
         """Check if all planned tasks have been launched and completed."""
         # All tasks must have been launched
