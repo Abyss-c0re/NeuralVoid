@@ -19,6 +19,7 @@ dependencies = [
 [tool.pyright]  
 venvPath = "."     
 venv = ".venv"
+extraPaths = ["../NeuralCore"]
 
 [project.scripts]
 neuralvoid = "neuralvoid.main:main"
