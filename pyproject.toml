@@ -1,3 +1,6 @@
+[tool.uv]
+config-settings = { editable_mode = "compat" }
+
 [project]
 name = "neuralvoid"
 version = "0.1.0"
