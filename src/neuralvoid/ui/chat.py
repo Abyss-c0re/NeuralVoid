@@ -9,6 +9,7 @@ from textual.containers import VerticalScroll
 from textual.binding import Binding
 
 from neuralcore.agents.core import Agent
+from neuralcore.actions.manager import registry
 
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
@@ -169,7 +170,7 @@ class LLMChatApp(App):
         self.agent = agent
 
         self.client = agent.client
-        self.registry = agent.registry
+        self.registry = registry
         self.system_prompt = system_prompt
         self.context_manager = agent.context_manager
         self.conversation = []

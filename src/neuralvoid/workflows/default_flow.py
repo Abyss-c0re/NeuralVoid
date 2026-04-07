@@ -32,16 +32,6 @@ def goal_achieved(state: AgentState, args=None):
         w in full_reply.lower() for w in ["error", "failed", "try again"]
     )
 
-    # ← Added debug logging (client-specific, belongs in NeuralVoid)
-    # logger.debug(
-    #     f"[CONDITION goal_achieved] evaluated → "
-    #     f"is_complete={is_complete}, "
-    #     f"has_marker={has_marker}, "
-    #     f"has_real_content={has_real_content}, "
-    #     f"full_reply_len={len(full_reply)}, "
-    #     f"mode={getattr(state, 'mode', None)}"
-    # )
-
     return (is_complete or has_marker) and has_real_content
 
 
@@ -171,7 +161,7 @@ class AgentFlow:
         RULES:
         - Use tool browser to load missing tools.
         - Keep responses short and natural after tool results.
-        - Current goal: {self.agent.goal or "General assistance"}"""
+        - Current goal: {self.agent.state.goal or "General assistance"}"""
         return self._inject_final_answer_instruction(base)
 
     def _build_sub_agent_system_prompt(
@@ -241,7 +231,7 @@ class AgentFlow:
 
         prompt = f"""Break this task into 5-8 small focused micro-tasks.
 
-        TASK: {self.agent.task}
+        TASK: {self.agent.state.task}
 
         Return ONLY valid JSON in this exact format:
         {{
@@ -289,7 +279,7 @@ class AgentFlow:
 
         except Exception as e:
             logger.warning(f"Planning failed: {e}. Using single task fallback.")
-            state.planned_tasks = [self.agent.task]
+            state.planned_tasks = [self.agent.state.task]
             state.task_tool_assignments = {0: []}
             state.task_dependencies = {0: None}
             state.current_task_index = 0
@@ -438,8 +428,8 @@ class AgentFlow:
 
         prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
 
-    Task: {self.agent.task}
-    Goal: {self.agent.goal or "General deployment assistance"}
+    Task: {self.agent.state.task}
+    Goal: {self.agent.state.goal or "General deployment assistance"}
 
     What was actually done (tool results):
     {tool_results_str or "No tool results recorded."}
@@ -460,7 +450,7 @@ class AgentFlow:
         except Exception:
             return (
                 f"✅ **Task completed successfully!**\n\n"
-                f"I have finished the deployment task: **{self.agent.task}**.\n"
+                f"I have finished the deployment task: **{self.agent.state.task}**.\n"
                 f"We are now back in normal chat mode. How else can I help you?"
             )
 
