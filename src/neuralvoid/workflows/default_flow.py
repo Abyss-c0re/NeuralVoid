@@ -9,7 +9,7 @@ from neuralcore.utils.logger import Logger
 from neuralcore.workflows.executors import AgentExecutors
 from neuralcore.utils.formatting import prepare_chat_messages
 
-from typing import List
+from typing import List, Dict
 
 logger = Logger.get_logger()
 
@@ -57,10 +57,98 @@ def has_final_reply(state: AgentState, args=None):
     return bool(full_reply) and not has_tools and len(full_reply) > 15
 
 
+@workflow.condition("max_tool_calls_reached")
+def max_tool_calls_reached(state: AgentState, args=None):
+    """Per-turn tool call limit (prevents runaway tool loops in one response)"""
+    max_allowed = args.get("max", 10) if isinstance(args, dict) else 10
+    tool_calls = getattr(state, "tool_calls", None) or []
+    return len(tool_calls) >= max_allowed
+
+
+@workflow.condition("too_many_empty_loops")
+def too_many_empty_loops(state: AgentState, args=None):
+    """Prevents infinite empty LLM replies"""
+    max_allowed = args.get("max", 5) if isinstance(args, dict) else 5
+    return getattr(state, "empty_loops", 0) >= max_allowed
+
+
+@workflow.condition("max_action_restarts_reached")
+def max_action_restarts_reached(state: AgentState, args=None):
+    """Prevents excessive 'Next Action' loops"""
+    max_allowed = args.get("max", 8) if isinstance(args, dict) else 8
+    return getattr(state, "action_restarts", 0) >= max_allowed
+
+
+@workflow.condition("chat_safety_break")
+def chat_safety_break(state: AgentState, args=None):
+    """
+    Combined safety condition for chat loops.
+    Returns True if ANY safety limit is reached.
+    Logs exactly what caused the break.
+    """
+    reasons = []
+
+    # 1. Check has_final_reply (normal good case)
+    full_reply = getattr(state, "full_reply", "").strip()
+    has_tools = bool(
+        getattr(state, "tool_calls", None) and len(getattr(state, "tool_calls", [])) > 0
+    )
+    has_final = bool(full_reply) and not has_tools and len(full_reply) > 15
+
+    if has_final:
+        reasons.append("has_final_reply")
+
+    # 2. Per-turn tool calls
+    max_tool_per_turn = (
+        args.get("max_tool_per_turn", 10) if isinstance(args, dict) else 10
+    )
+    tool_calls = getattr(state, "tool_calls", None) or []
+    if len(tool_calls) >= max_tool_per_turn:
+        reasons.append(f"max_tool_calls_reached({len(tool_calls)}/{max_tool_per_turn})")
+
+    # 3. Too many empty loops
+    max_empty = args.get("max_empty", 5) if isinstance(args, dict) else 5
+    empty_loops = getattr(state, "empty_loops", 0)
+    if empty_loops >= max_empty:
+        reasons.append(f"too_many_empty_loops({empty_loops}/{max_empty})")
+
+    # 4. Too many action restarts
+    max_restarts = args.get("max_restarts", 8) if isinstance(args, dict) else 8
+    action_restarts = getattr(state, "action_restarts", 0)
+    if action_restarts >= max_restarts:
+        reasons.append(f"max_action_restarts_reached({action_restarts}/{max_restarts})")
+
+    # Log what actually caused the break
+    if reasons:
+        reason_str = " + ".join(reasons)
+        logger.info(
+            f"[SAFETY BREAK] Triggered by: {reason_str} | full_reply_len={len(full_reply)}"
+        )
+        return True
+
+    return False
+
+
 # ==================== LOOPS ====================
-@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="goal_achieved")
+@workflow.loop("chat_task_loop", max_iterations=3, break_condition="chat_safety_break")
+async def chat_task_loop(agent, state: AgentState, messages: List[Dict]):
+    """Inner decorated task loop for chat"""
+    async for ev, pl in agent.flow.executors.chat_loop(messages, state):
+        yield ev, pl
+
+
+@workflow.loop(
+    "agentic_task_loop", max_iterations=12, break_condition="subtask_complete"
+)
+async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
+    """Inner decorated task loop for sub-agents"""
+    async for ev, pl in agent.flow.executors.agentic_loop(iteration, state):
+        yield ev, pl
+
+
+@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="has_final_reply")
 async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
-    """Chat mode loop — waits for new user messages and runs simplified chat_loop"""
+    """Outer persistent chat loop"""
     while True:
         try:
             raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
@@ -92,7 +180,6 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
                 agent.message_queue.task_done()
                 continue
 
-        # Extract user content
         content = (
             raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
         )
@@ -105,21 +192,23 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
 
         agent.manager.reset_to_default_package("deploy_chat_loop", agent.workflow)
 
-        async for ev, pl in agent.flow.executors.chat_loop(
+        # Call the nested decorated inner loop
+        async for ev, pl in chat_task_loop(
+            agent,
+            state,
             prepare_chat_messages(
                 content, system_prompt=agent.flow._build_chat_system_prompt()
             ),
-            state,
         ):
             yield ev, pl
 
         agent.message_queue.task_done()
 
 
-@workflow.loop("agentic_loop", max_iterations=50, break_condition="subtask_complete")
+@workflow.loop("agentic_loop", max_iterations=30, break_condition="subtask_complete")
 async def agentic_loop(agent, state: AgentState):
-    """Thin wrapper around the simplified agentic_loop"""
-    async for ev, pl in agent.flow.executors.agentic_loop(0, state):
+    """Outer agentic loop"""
+    async for ev, pl in agentic_task_loop(agent, state, iteration=0):
         yield ev, pl
 
 
@@ -199,15 +288,17 @@ class AgentFlow:
                 yield ("cancelled", "User requested stop")
                 break
 
+            # Use the outer decorated loop
             async for ev, pl in self.agent.execute_loop(
                 "chat_tool_loop", initial_state=state
             ):
                 yield ev, pl
 
-            await asyncio.sleep(0.01)  # prevent tight CPU loop
+            await asyncio.sleep(0.01)
 
     @workflow.step("sub_agent_execute", name="llm_stream")
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
+        """Sub-agent execution step"""
         async for ev, pl in self.agent.execute_loop(
             "agentic_loop", initial_state=state
         ):
