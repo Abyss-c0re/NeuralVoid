@@ -147,7 +147,7 @@ async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
 
 
 @workflow.loop("chat_tool_loop", max_iterations=50, break_condition="has_final_reply")
-async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
+async def chat_tool_loop(agent, state: AgentState):
     """Outer persistent chat loop"""
     while True:
         try:
@@ -158,27 +158,6 @@ async def chat_tool_loop(agent, state: AgentState, user_query: str = ""):
             continue
         except asyncio.CancelledError:
             break
-
-        # Handle control events
-        if isinstance(raw_msg, dict) and "event" in raw_msg:
-            agent.manager.reset_to_default_package("deploy_chat_loop", agent.workflow)
-            ev = raw_msg["event"]
-            if ev in ("sub_task_completed", "sub_task_failed"):
-                yield (ev, raw_msg)
-                await agent.post_system_message(
-                    f"[STEP {ev.replace('sub_task_', '').upper()}] {raw_msg.get('task_id')}"
-                )
-            elif ev == "switch_workflow":
-                name = raw_msg.get("name")
-                if isinstance(name, dict):
-                    name = name.get("name") or next(iter(name.keys()), "deploy_chat")
-                logger.info(f"Switching workflow to: {name}")
-                try:
-                    agent.workflow.switch_workflow(name)
-                except Exception as e:
-                    logger.error(f"Workflow switch failed: {e}", exc_info=True)
-                agent.message_queue.task_done()
-                continue
 
         content = (
             raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
