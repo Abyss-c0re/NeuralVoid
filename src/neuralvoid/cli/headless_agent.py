@@ -12,6 +12,10 @@ from typing import Optional
 from neuralcore.agents.core import Agent
 from neuralcore.bridge.websocket import WebSocketBridge
 
+from neuralcore.utils.logger import Logger
+
+logger = Logger.get_logger()
+
 
 class HeadlessAgentRunner:
     """
@@ -68,7 +72,9 @@ class HeadlessAgentRunner:
         data = {
             "pid": os.getpid(),
             "status": status,
-            "started_at": self._start_time.isoformat() + "Z" if self._start_time else None,
+            "started_at": self._start_time.isoformat() + "Z"
+            if self._start_time
+            else None,
             "last_update": now.isoformat() + "Z",
             "prompt": prompt,
             "current_iteration": iteration,
@@ -112,7 +118,9 @@ class HeadlessAgentRunner:
             if self._stop_event:
                 self._stop_event.set()
 
-            self._write_status("shutting_down", message="Received shutdown signal", force=True)
+            self._write_status(
+                "shutting_down", message="Received shutdown signal", force=True
+            )
 
             for task in asyncio.all_tasks(loop):
                 if task is not asyncio.current_task():
@@ -183,9 +191,20 @@ class HeadlessAgentRunner:
                     break
 
                 # Forward important events to WebSocket via the hook
-                if event_type in ("tool_result", "final_answer", "finish", "error",
-                                  "phase_changed", "planning_complete"):
-                    await self.agent.on_background_event(event_type, payload)
+                if event_type in (
+                    "tool_result",
+                    "final_answer",
+                    "finish",
+                    "error",
+                    "phase_changed",
+                    "planning_complete",
+                ):
+                    if hasattr(self.agent, "on_background_event"):
+                        await self.agent.on_background_event(event_type, payload)
+                    else:
+                        logger.warning(
+                            "Agent does not implement on_background_event hook"
+                        )
 
                 # ── Local console + status file handling (unchanged) ──
                 if event_type == "phase_changed":
@@ -208,7 +227,9 @@ class HeadlessAgentRunner:
 
                 elif event_type == "step_start":
                     current_iteration = payload.get("iteration", current_iteration)
-                    print(f"\n[{current_iteration}] Iteration start (phase: {current_phase})")
+                    print(
+                        f"\n[{current_iteration}] Iteration start (phase: {current_phase})"
+                    )
 
                 elif event_type == "content_delta":
                     print(payload, end="", flush=True)
@@ -231,8 +252,12 @@ class HeadlessAgentRunner:
                     result = str(payload.get("result", ""))
                     if payload.get("error"):
                         print(f"\n❌ {name} failed: {result[:300]}...")
-                        self._write_status("error", iteration=current_iteration,
-                                           phase=current_phase, error=result[:300])
+                        self._write_status(
+                            "error",
+                            iteration=current_iteration,
+                            phase=current_phase,
+                            error=result[:300],
+                        )
                     else:
                         print(f"\n✅ {name} → {result[:300]}...")
                         self._write_status(
@@ -317,7 +342,11 @@ class HeadlessAgentRunner:
             else:
                 try:
                     current = json.loads(self.status_path.read_text())
-                    if current.get("status") not in ("error", "cancelled", "shutting_down"):
+                    if current.get("status") not in (
+                        "error",
+                        "cancelled",
+                        "shutting_down",
+                    ):
                         self._write_status("failed", force=True)
                 except Exception:
                     self._write_status("failed", force=True)
