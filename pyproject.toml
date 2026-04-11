@@ -16,7 +16,6 @@ dependencies = [
     "pypdf>=6.9.2",
     "python-docx>=1.2.0",
     "textual>=0.81.1",
-    "websockets>=16.0",
 ]
 
 [tool.pyright]  

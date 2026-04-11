@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from neuralcore.agents.core import Agent
-from neuralvoid.bridge.web import HeadlessWebSocketBridge
+from neuralcore.bridge.websocket import WebSocketBridge
 
 
 class HeadlessAgentRunner:
@@ -40,7 +40,7 @@ class HeadlessAgentRunner:
         self._start_time: Optional[datetime] = None
 
         self._stop_event: Optional[asyncio.Event] = None
-        self._bridge: Optional[HeadlessWebSocketBridge] = None
+        self._bridge: Optional[WebSocketBridge] = None
         self._bridge_task: Optional[asyncio.Task] = None
 
     # ============================================================
@@ -157,12 +157,13 @@ class HeadlessAgentRunner:
         self._write_status("starting", prompt=prompt, force=True)
 
         # === Start bidirectional WebSocket bridge ===
-        self._bridge = HeadlessWebSocketBridge(
+        self._bridge = WebSocketBridge(
             agent=self.agent,
             host="127.0.0.1",
             port=self.websocket_port,
         )
-        self._bridge_task = asyncio.create_task(self._bridge.start())
+        if self._bridge:
+            self._bridge_task = asyncio.create_task(self._bridge.start())
 
         current_iteration = 0
         current_phase = "idle"
