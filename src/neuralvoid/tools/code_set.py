@@ -264,3 +264,95 @@ async def store_codebase_snapshot(agent, name: str = "current_codebase") -> str:
         },
     )
     return f"✅ Codebase snapshot '{name}' stored ({count} files)"
+
+
+@tool(
+    "CodingTools",
+    tags=["git", "vcs", "version"],
+    name="git_status",
+    description="Show current Git repository status.",
+)
+async def git_status(repo_path: str = ".") -> str:
+    """Run git status."""
+    try:
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            repo_path,
+            "status",
+            "--short",
+            "-b",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await result.communicate()
+        return stdout.decode().strip() or "Clean working tree."
+    except Exception as e:
+        return f"git_status error: {str(e)}"
+
+
+@tool(
+    "CodingTools",
+    tags=["git", "diff"],
+    name="git_diff",
+    description="Show unified diff of changes (staged or unstaged).",
+)
+async def git_diff(repo_path: str = ".", staged: bool = False) -> str:
+    args = ["git", "-C", repo_path, "diff", "--no-color"]
+    if staged:
+        args.insert(-1, "--cached")
+    try:
+        result = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await result.communicate()
+        return stdout.decode() or "(no changes)"
+    except Exception as e:
+        return f"git_diff error: {str(e)}"
+
+
+@tool(
+    "CodingTools",
+    tags=["git", "commit"],
+    name="git_commit",
+    description="Commit changes with message (safe, no auto-push).",
+    require_confirmation=True,
+)
+async def git_commit(repo_path: str = ".", message: str = "AI-assisted changes") -> str:
+    try:
+        await asyncio.create_subprocess_exec("git", "-C", repo_path, "add", ".")
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            repo_path,
+            "commit",
+            "-m",
+            message,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await result.communicate()
+        return f"Committed: {stdout.decode().strip() or stderr.decode().strip()}"
+    except Exception as e:
+        return f"git_commit error: {str(e)}"
+
+
+@tool(
+    "CodingTools",
+    tags=["git", "branch"],
+    name="git_branch",
+    description="List branches or create/switch branch.",
+)
+async def git_branch(repo_path: str = ".", new_branch: str = None) -> str:
+    if new_branch:
+        cmd = ["git", "-C", repo_path, "checkout", "-b", new_branch]
+    else:
+        cmd = ["git", "-C", repo_path, "branch", "--show-current"]
+    try:
+        result = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await result.communicate()
+        return stdout.decode().strip()
+    except Exception as e:
+        return f"git_branch error: {str(e)}"
