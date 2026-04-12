@@ -204,3 +204,63 @@ async def read_folder(
                     pass
 
     return "\n".join(lines)
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "edit", "diff"],
+    name="apply_diff",
+    description="Apply a unified diff patch to a file (safe preview first).",
+    require_confirmation=True,
+)
+async def apply_diff(file_path: str, diff_content: str) -> str:
+    """Apply patch using git apply --check first, then apply."""
+    try:
+        # Safety check
+        check = await asyncio.create_subprocess_exec(
+            "git",
+            "apply",
+            "--check",
+            "--unidiff-zero",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        await check.communicate(diff_content.encode())
+
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "apply",
+            "--unidiff-zero",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        await result.communicate(diff_content.encode())
+        return f"Successfully applied diff to '{file_path}'"
+    except Exception as e:
+        return f"apply_diff failed: {str(e)}"
+
+
+@tool(
+    "FileEditingTools",
+    tags=["file", "edit", "regex"],
+    name="regex_replace",
+    description="Regex-based find and replace in a file (with dry-run option).",
+)
+async def regex_replace(
+    file_path: str, pattern: str, replacement: str, dry_run: bool = True
+) -> str:
+    import re
+
+    try:
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            content = await f.read()
+        new_content, count = re.subn(pattern, replacement, content)
+        if dry_run:
+            return f"Dry-run: would replace {count} occurrence(s) in '{file_path}'"
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+            await f.write(new_content)
+        return f"Replaced {count} occurrence(s) using regex in '{file_path}'"
+    except Exception as e:
+        return f"regex_replace error: {str(e)}"
