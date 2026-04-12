@@ -343,7 +343,7 @@ async def git_commit(repo_path: str = ".", message: str = "AI-assisted changes")
     name="git_branch",
     description="List branches or create/switch branch.",
 )
-async def git_branch(repo_path: str = ".", new_branch: str = None) -> str:
+async def git_branch(repo_path: str = ".", new_branch: str = "") -> str:
     if new_branch:
         cmd = ["git", "-C", repo_path, "checkout", "-b", new_branch]
     else:

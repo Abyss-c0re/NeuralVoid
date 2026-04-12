@@ -1,4 +1,5 @@
 from neuralcore.actions.manager import tool
+from neuralcore.utils.os_info import get_os_info
 import os
 import shutil
 
@@ -224,3 +225,25 @@ async def get_file_info(path: str) -> str:
         return f"Path: {path}\nType: {'Directory' if is_dir else 'File'}\nSize: {size} bytes\nModified: {mtime}"
     except Exception as e:
         return f"get_file_info error: {str(e)}"
+
+
+@tool(
+    "TerminalTools",
+    tags=["os", "system", "environment", "info"],
+    name="get_os_info",
+    description="Returns detailed, user-friendly information about the current operating system "
+    "(Linux distro with PRETTY_NAME, or fallback to platform details on other OSes). "
+    "Useful for adapting commands, choosing package managers, or reporting environment.",
+)
+async def os_info() -> str:
+    """
+    Async wrapper around the imported _get_distro_info().
+    Keeps NeuralCore clean and reusable.
+    """
+    try:
+        result = await get_os_info()
+        return str(result)
+    except Exception as e:
+        import platform
+
+        return f"OS detection error: {str(e)}. Fallback: {platform.system()} {platform.release()} ({platform.machine()})"
