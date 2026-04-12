@@ -17,7 +17,7 @@
   - Advanced condition evaluator with built-in state introspection (`needs_reflection`, `all_sub_tasks_completed`, `error_rate_high`, sub-task stats, etc.).
   - Step-level overrides (client, temperature, max_tokens, system_prompt, toolset).
   - Unified event stream with `step_start`, `step_completed`, `phase_changed`, `sub_agent_progress`, etc.
-* **AgentFlow** handlers: All `_wf_*` steps are supplied by AgentFlow (decorated with `@workflow.set`). Executors remain in WorkflowEngine.
+* **AgentFlow** handlers: All `_wf_*` steps are supplied by AgentFlow (decorated with `@workflow.step`). Executors remain in WorkflowEngine.
 * **Dynamic Tools & File Editing**:
   - `FileEditingTools`: `write_file`, `replace_block`, `open_file_sync`, `open_file_async`.
   - Tools can be loaded/unloaded per step or per sub-agent.
