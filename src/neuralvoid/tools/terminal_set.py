@@ -1,5 +1,7 @@
 from neuralcore.actions.manager import tool
 from neuralcore.utils.os_info import get_os_info
+from pathlib import Path
+from typing import Optional, List
 import os
 import shutil
 
@@ -159,19 +161,56 @@ async def delete_directory(dir_path: str) -> str:
     "TerminalTools",
     tags=["filesystem", "search"],
     name="search_files",
-    description="Search for files or folders by name.",
+    description=(
+        "Recursively search for files or directories by partial name match. "
+        "Supports glob-style wildcards (*) and returns full paths. "
+        "Use this to explore project structures, find specific files, or locate assets."
+    ),
+    require_confirmation=False,  # Set True if you want human gate for broad searches
 )
-async def search_files(path: str = ".", name: str = "") -> str:
-    """Search files by name."""
+async def search_files(
+    path: str = ".",
+    name: str = "*",
+    max_results: Optional[int] = 200,
+    include_dirs: bool = True,
+    include_files: bool = True,
+) -> str:
+    """
+    Generic filesystem search tool.
+
+    - path: Starting directory (relative or absolute).
+    - name: Partial name or glob pattern (e.g. "*.py", "config*", "README").
+    - max_results: Safety limit to prevent overwhelming output on large trees.
+    - include_dirs / include_files: Filter what to return.
+    """
     try:
-        results = []
-        for root, dirs, files in os.walk(path):
-            for item in files + dirs:
-                if not name or name.lower() in item.lower():
-                    results.append(os.path.join(root, item))
-        return "\n".join(results) if results else "(no matches)"
+        search_path = Path(path).resolve()
+        if not search_path.exists():
+            return f"Error: Path does not exist - {search_path}"
+
+        results: List[str] = []
+        pattern = f"*{name}*" if "*" not in name and "?" not in name and name else name
+
+        # Use pathlib.rglob for cleaner, more Pythonic recursive search (leverages scandir under the hood)
+        for item in search_path.rglob(pattern):
+            if (item.is_file() and include_files) or (item.is_dir() and include_dirs):
+                results.append(str(item))
+
+            if max_results and len(results) >= max_results:
+                results.append(f"... (truncated - {max_results} results limit reached)")
+                break
+
+        if not results:
+            return f"(no matches for '{name}' in '{path}')"
+
+        # Return clean, sorted output for better agent readability
+        return "\n".join(sorted(results))
+
+    except PermissionError:
+        return f"Permission denied accessing path: {path}"
     except Exception as e:
-        return f"search_files error: {str(e)}"
+        # Keep error messages concise and actionable for the agent
+        return f"search_files error: {type(e).__name__} - {str(e)}"
 
 
 @tool(
