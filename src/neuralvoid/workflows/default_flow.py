@@ -8,8 +8,10 @@ from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.workflows.executors import AgentExecutors
 from neuralcore.utils.formatting import prepare_chat_messages
+from neuralcore.utils.prompt_builder import PromptBuilder
 
-from typing import List, Dict
+
+from typing import List, Dict, Tuple, Any, AsyncIterator
 
 logger = Logger.get_logger()
 
@@ -17,44 +19,73 @@ logger = Logger.get_logger()
 # ==================== CONDITIONS ====================
 @workflow.condition("goal_achieved")
 def goal_achieved(state: AgentState, args=None):
-    """Break when we have a real final answer (explicit flag OR marker)."""
+    """Break ONLY when we have a real final answer.
+    Now much stricter for lightweight context."""
     if getattr(state, "mode", None) == "casual":
         return False
 
     full_reply = getattr(state, "full_reply", "").strip()
     is_complete = getattr(state, "is_complete", False)
-
-    # The marker is defined in AgentFlow
     marker = "[FINAL_ANSWER_COMPLETE]"
 
     has_marker = marker in full_reply
-    has_real_content = len(full_reply) > 20 and not any(
-        w in full_reply.lower() for w in ["error", "failed", "try again"]
+    has_real_content = len(full_reply) > 30 and not any(
+        w in full_reply.lower()
+        for w in ["error", "failed", "try again", "still working"]
     )
 
-    return (is_complete or has_marker) and has_real_content
+    # Stronger check: either marker OR explicit "task complete" language + no pending sub-tasks
+    explicit_done = any(
+        phrase in full_reply.lower()
+        for phrase in [
+            "task complete",
+            "goal achieved",
+            "all done",
+            "finished successfully",
+        ]
+    )
+
+    all_subtasks_done = (
+        len(state.planned_tasks) == 0
+        or state.current_task_index >= len(state.planned_tasks) - 1
+    )
+
+    should_break = (
+        (is_complete or has_marker or explicit_done)
+        and has_real_content
+        and all_subtasks_done
+    )
+
+    if should_break:
+        logger.info(
+            f"[GOAL ACHIEVED] Triggered | marker={has_marker} | explicit_done={explicit_done} | subtasks_done={all_subtasks_done}"
+        )
+    return should_break
 
 
 @workflow.condition("subtask_complete")
 def subtask_complete(state: AgentState, args=None):
-    """Break when sub-task is really done."""
-    is_complete = getattr(state, "is_complete", False)
+    """Break when sub-task is really done — stricter for multi-step."""
     full_reply = getattr(state, "full_reply", "").strip()
-
     marker = "[FINAL_ANSWER_COMPLETE]"
-    has_marker = marker in full_reply
 
-    return is_complete or has_marker
+    has_marker = marker in full_reply
+    explicit_done = any(
+        phrase in full_reply.lower()
+        for phrase in ["sub-task complete", "this step done", "finished this task"]
+    )
+
+    return has_marker or explicit_done or getattr(state, "is_complete", False)
 
 
 @workflow.condition("has_final_reply")
 def has_final_reply(state: AgentState, args=None):
-    """Break condition for chat_tool_loop"""
+    """Chat loop break — keep simple but require meaningful content."""
     full_reply = getattr(state, "full_reply", "").strip()
     has_tools = bool(
         getattr(state, "tool_calls", None) and len(getattr(state, "tool_calls", [])) > 0
     )
-    return bool(full_reply) and not has_tools and len(full_reply) > 15
+    return bool(full_reply) and not has_tools and len(full_reply) > 25
 
 
 @workflow.condition("max_tool_calls_reached")
@@ -146,7 +177,7 @@ async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
         yield ev, pl
 
 
-@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="has_final_reply")
+@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="goal_achieved")
 async def chat_tool_loop(agent, state: AgentState):
     """Outer persistent chat loop"""
     while True:
@@ -349,10 +380,12 @@ class AgentFlow:
 
         except Exception as e:
             logger.warning(f"Planning failed: {e}. Using single task fallback.")
+            state.reset_for_new_task(new_task=self.agent.state.task)
             state.planned_tasks = [self.agent.state.task]
             state.task_tool_assignments = {0: []}
-            state.task_dependencies = {0: None}
+            state.task_dependencies = {0: []}
             state.current_task_index = 0
+            state.ensure_dependencies_structure()
 
     @workflow.step("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
@@ -527,62 +560,61 @@ class AgentFlow:
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
         return "✅ Sub-task completed.\n\nKey results recorded in shared context."
 
-    async def _ensure_subtasks_planned(self, state: AgentState, original_query: str):
-        """Ensure we have a proper LLM-generated plan.
-        Reuses the exact same planning logic as the orchestrator."""
-        if getattr(state, "planned_tasks", None) and len(state.planned_tasks) > 0:
-            logger.debug("Subtasks already planned — skipping")
-            return
+    async def _ensure_subtasks_planned(
+        self, state: AgentState, original_query: str
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Generic, LLM-driven structured planning.
+        Guarantees task_dependencies remains Dict[int, List[int]]."""
+        yield ("phase_changed", {"phase": "planning"})
 
-        state.phase = self.Phase.PLAN
-        yield ("phase_changed", {"phase": "plan"})
-
-        prompt = f"""Break this task into 5-8 small focused micro-tasks.
-
-        TASK: {original_query}
-
-        Return ONLY valid JSON in this exact format:
-        {{
-        "microtasks": [
-            {{
-            "description": "Clear one-sentence description",
-            "suggested_tools": ["tool1", "tool2"],
-            "depends_on": null
-            }},
-            ...
-        ]
-        }}
-
-        Note: Use "depends_on": null for tasks that can start immediately.
-        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
-
-        raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
+        planning_prompt = PromptBuilder.task_decomposition(original_query)
 
         try:
-            data = json.loads(raw)
-            microtasks = data.get("microtasks", [])
+            plan_text = await self.agent.client.chat(
+                planning_prompt, temperature=0.0, max_tokens=1200
+            )
+            plan = json.loads(plan_text.strip())
 
             state.planned_tasks.clear()
             state.task_tool_assignments.clear()
             state.task_dependencies.clear()
 
-            for i, task in enumerate(microtasks):
-                state.planned_tasks.append(task.get("description", f"Task {i + 1}"))
-                state.task_tool_assignments[i] = task.get("suggested_tools", [])
-                state.task_dependencies[i] = task.get("depends_on")
+            for i, step in enumerate(plan.get("steps", [])):
+                state.planned_tasks.append(step.get("description", f"Task {i + 1}"))
 
-            state.current_task_index = 0
-            state.task_id_map.clear()
+                # Safe conversion to List[int]
+                deps_raw = step.get("dependencies", [])
+                if isinstance(deps_raw, (int, str)):
+                    deps = [int(deps_raw)] if str(deps_raw).isdigit() else []
+                elif isinstance(deps_raw, list):
+                    deps = [
+                        int(d)
+                        for d in deps_raw
+                        if isinstance(d, (int, str)) and str(d).isdigit()
+                    ]
+                else:
+                    deps = []
 
-            logger.info(f"[PLAN] LLM planned {len(state.planned_tasks)} micro-tasks")
-            yield (
-                "info",
-                f"Planned {len(state.planned_tasks)} micro-tasks with dependencies",
+                state.task_dependencies[i] = deps
+                if step.get("suggested_tool_category"):
+                    state.task_tool_assignments[i] = [step["suggested_tool_category"]]
+
+            state.ensure_dependencies_structure()  # enforce type
+
+            logger.info(
+                f"[PLANNING] Created {len(state.planned_tasks)} sub-tasks with dependencies"
             )
+            for i, t in enumerate(state.planned_tasks):
+                deps = state.task_dependencies.get(i, [])
+                logger.debug(f"  Step {i}: {t[:80]}... | deps={deps}")
+
+            yield ("planning_complete", {"planned_tasks": state.planned_tasks})
 
         except Exception as e:
             logger.warning(f"Planning failed: {e}. Using single task fallback.")
             state.planned_tasks = [original_query]
             state.task_tool_assignments = {0: []}
-            state.task_dependencies = {0: None}
+            state.task_dependencies = {0: []}
             state.current_task_index = 0
+            state.ensure_dependencies_structure()
+            yield ("planning_fallback", {"reason": str(e)})
