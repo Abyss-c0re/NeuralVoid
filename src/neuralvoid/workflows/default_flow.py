@@ -26,9 +26,9 @@ def goal_achieved(state: AgentState, args=None):
 
     full_reply = getattr(state, "full_reply", "").strip()
     is_complete = getattr(state, "is_complete", False)
-    marker = "[FINAL_ANSWER_COMPLETE]"
+    # marker = "[FINAL_ANSWER_COMPLETE]"
 
-    has_marker = marker in full_reply
+    # has_marker = marker in full_reply
     has_real_content = len(full_reply) > 30 and not any(
         w in full_reply.lower()
         for w in ["error", "failed", "try again", "still working"]
@@ -51,14 +51,12 @@ def goal_achieved(state: AgentState, args=None):
     )
 
     should_break = (
-        (is_complete or has_marker or explicit_done)
-        and has_real_content
-        and all_subtasks_done
+        (is_complete or explicit_done) and has_real_content and all_subtasks_done
     )
 
     if should_break:
         logger.info(
-            f"[GOAL ACHIEVED] Triggered | marker={has_marker} | explicit_done={explicit_done} | subtasks_done={all_subtasks_done}"
+            f"[GOAL ACHIEVED] Triggered | explicit_done={explicit_done} | subtasks_done={all_subtasks_done}"
         )
     return should_break
 
