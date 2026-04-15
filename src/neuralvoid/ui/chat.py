@@ -9,7 +9,7 @@ from textual.containers import VerticalScroll
 from textual.binding import Binding
 
 from neuralcore.agents.core import Agent
-from neuralcore.actions.manager import registry
+from neuralcore.actions.registry import registry
 
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer

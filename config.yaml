@@ -83,6 +83,8 @@ tools:
   WebTools:
     modules:
       - web_set
+  ContextManager:
+    #build in
       
 workflows:
   deploy_chat:

@@ -8,10 +8,9 @@ from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.workflows.executors import AgentExecutors
 from neuralcore.utils.formatting import prepare_chat_messages
-from neuralcore.utils.prompt_builder import PromptBuilder
 
 
-from typing import List, Dict, Tuple, Any, AsyncIterator
+from typing import List, Dict
 
 logger = Logger.get_logger()
 
@@ -485,9 +484,6 @@ class AgentFlow:
                     yield ("waiting_for_subtask", {"task_id": task_id})
             await asyncio.sleep(0.2)
 
-        # Do NOT force current_task_index to the end here — let launch logic control it
-        # state.sub_task_ids = []   ← removed because we now use task_id_map
-
     @workflow.step("orchestrator", name="check_orchestrator_complete")
     async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
         """Check if all planned tasks have been launched and completed."""
@@ -564,4 +560,3 @@ class AgentFlow:
 
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
         return "✅ Sub-task completed.\n\nKey results recorded in shared context."
-

@@ -1,4 +1,4 @@
-from neuralcore.actions.manager import tool
+from neuralcore.actions.registry import tool, sequenced
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
@@ -54,7 +54,7 @@ async def fetch_web_page(url: str) -> str:
             "Upgrade-Insecure-Requests": "1",
         }
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=15) as resp:
+            async with session.get(url) as resp:
                 if resp.status != 200:
                     return f"HTTP {resp.status}"
                 html = await resp.text()
@@ -106,3 +106,22 @@ async def search_web_and_index(agent, query: str, max_results: int = 3) -> str:
                 await index_web_page(agent, url)
                 indexed += 1
     return f"✅ Searched '{query}' and indexed {indexed} pages"
+
+
+@sequenced(
+    name="research_topic",
+    description="Quick & reliable research: search + auto-index + summary.",
+    set_name="WebTools",
+    tags=["web", "research", "index", "kb", "workflow"],
+    propagate=True,
+    output_from="GetContext",
+    dependencies={
+        "search_web_and_index": {"query": "input", "max_results": "max_results"},
+        "GetContext": {
+            "query": "input",
+        },
+    },
+    steps=["search_web_and_index", "GetContext"],
+)
+def research_topic():
+    pass

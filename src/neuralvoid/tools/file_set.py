@@ -4,7 +4,7 @@ import asyncio
 import aiofiles
 from PIL import Image
 from io import BytesIO
-from neuralcore.actions.manager import tool, sequenced
+from neuralcore.actions.registry import tool, sequenced
 
 
 # ─────────────────────────────────────────────────────────────

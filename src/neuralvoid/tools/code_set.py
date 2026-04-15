@@ -1,4 +1,4 @@
-from neuralcore.actions.manager import tool
+from neuralcore.actions.registry import tool
 import os
 import asyncio
 
