@@ -7,7 +7,7 @@ from neuralcore.agents.state import AgentState
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.workflows.executors import AgentExecutors
-from neuralcore.utils.formatting import prepare_chat_messages
+from neuralcore.utils.prompt_builder import PromptBuilder
 
 
 from typing import List, Dict
@@ -165,7 +165,9 @@ def chat_safety_break(state: AgentState, args=None):
 
 
 # ==================== LOOPS ====================
-@workflow.loop("chat_task_loop", max_iterations=None, break_condition="chat_safety_break")
+@workflow.loop(
+    "chat_task_loop", max_iterations=None, break_condition="chat_safety_break"
+)
 async def chat_task_loop(agent, state: AgentState, messages: List[Dict]):
     """Inner decorated task loop for chat"""
     async for ev, pl in agent.flow.executors.chat_loop(messages, state):
@@ -183,7 +185,7 @@ async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
 
 @workflow.loop("chat_tool_loop", max_iterations=None, break_condition="goal_achieved")
 async def chat_tool_loop(agent, state: AgentState):
-    """Outer persistent chat loop"""
+    """Outer persistent chat loop — message preparation moved to AgentState."""
     while True:
         try:
             raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
@@ -201,18 +203,19 @@ async def chat_tool_loop(agent, state: AgentState):
             agent.message_queue.task_done()
             continue
 
-        state.full_reply = ""
-        state.tool_calls = None
+        messages = state.prepare_messages(
+            content=content,
+            system_prompt=PromptBuilder.deploy_chat_system_prompt(
+                goal=state.goal or "General assistance"
+            ),
+            reset=True,  # fresh context for this turn in chat mode
+        )
 
-        agent.manager.reset_to_default_package("deploy_chat_loop", agent.workflow)
-
-        # Call the nested decorated inner loop
+        # Call the nested decorated inner loop with prepared messages
         async for ev, pl in chat_task_loop(
             agent,
             state,
-            prepare_chat_messages(
-                content, system_prompt=agent.flow._build_chat_system_prompt()
-            ),
+            messages,  # now comes from state.prepare_messages
         ):
             yield ev, pl
 
@@ -241,51 +244,10 @@ class AgentFlow:
         self.engine = agent.workflow
         self.executors = AgentExecutors(agent, self.Phase)
         self.agent.flow = self
-        self.FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
         workflow.bind_to_engine(self.engine, instance=self)
 
-    # ==================== SYSTEM PROMPTS ====================
-
-    def _inject_final_answer_instruction(self, base_prompt: str) -> str:
-        """Strong, consistent instruction for all prompts."""
-        return f"""{base_prompt}
-
-    CRITICAL FINAL ANSWER RULE:
-    When you have **fully completed** the assigned task/micro-task and verified all required outputs, you MUST end your response with **exactly** this marker on its own line:
-
-    {self.FINAL_ANSWER_MARKER}
-
-    Do not add anything after the marker. Use it only when the goal is 100% achieved."""
-
-    # === UPDATED PROMPTS ===
-    def _build_chat_system_prompt(self) -> str:
-        base = f"""You are a helpful Deploy Agent that executes commands immediately.
-
-        RULES:
-        - Use tool browser to load missing tools.
-        - Keep responses short and natural after tool results.
-        - Current goal: {self.agent.state.goal or "General assistance"}"""
-        return self._inject_final_answer_instruction(base)
-
-    def _build_sub_agent_system_prompt(
-        self, task_desc: str, assigned_tools: List[str]
-    ) -> str:
-        tools_hint = (
-            f"\n\nAvailable tools: {', '.join(assigned_tools[:15])}{', ...' if len(assigned_tools) > 15 else ''}"
-            if assigned_tools
-            else ""
-        )
-        base = f"""You are a precise sub-agent executing **ONE single micro-task only**.
-
-    TASK: {task_desc}{tools_hint}
-
-    CRITICAL RULES:
-    - Complete ONLY this exact task.
-    - If the task involves reading a file, use open_file_async or open_file_sync directly.
-    - When you have finished the task, output a short summary and end with exactly: {self.FINAL_ANSWER_MARKER}"""
-        return self._inject_final_answer_instruction(base)
-
     # ==================== WORKFLOWS ====================
+
     @workflow.step("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
         """Persistent chat mode"""
@@ -328,34 +290,14 @@ class AgentFlow:
 
     @workflow.step("orchestrator", name="plan_microtasks")
     async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
+        """Plan complex task into micro-tasks using PromptBuilder directly."""
         if state.planned_tasks:  # already planned
             return
 
         state.phase = self.Phase.PLAN
         yield ("phase_changed", {"phase": "plan"})
 
-        prompt = f"""Break this task into 5-8 small focused micro-tasks.
-
-        TASK: {self.agent.state.task}
-
-        Return ONLY valid JSON in this exact format:
-        {{
-        "microtasks": [
-            {{
-            "description": "Clear one-sentence description",
-            "suggested_tools": ["tool1", "tool2"],
-            "depends_on": null
-            }},
-            {{
-            "description": "...",
-            "suggested_tools": ["tool3"],
-            "depends_on": "step_1"     # use previous description as reference or null
-            }}
-        ]
-        }}
-
-        Note: Use "depends_on": null for tasks that can start immediately.
-        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
+        prompt = PromptBuilder.plan_microtasks_prompt(self.agent.state.task)
 
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
 
@@ -370,9 +312,7 @@ class AgentFlow:
             for i, task in enumerate(microtasks):
                 state.planned_tasks.append(task.get("description", f"Task {i + 1}"))
                 state.task_tool_assignments[i] = task.get("suggested_tools", [])
-                state.task_dependencies[i] = task.get(
-                    "depends_on"
-                )  # can be None or string
+                state.task_dependencies[i] = task.get("depends_on")
 
             state.current_task_index = 0
             state.task_id_map.clear()
@@ -393,7 +333,7 @@ class AgentFlow:
 
     @workflow.step("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
-        """Launch tasks whose dependencies are satisfied (or have no dependency)."""
+        """Launch tasks whose dependencies are satisfied."""
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
@@ -416,7 +356,7 @@ class AgentFlow:
                             dependency_satisfied = True
                             break
                 if not dependency_satisfied:
-                    continue  # wait for dependency
+                    continue
 
             # Launch this task
             assigned_tools = state.task_tool_assignments.get(idx, [])
@@ -428,7 +368,7 @@ class AgentFlow:
                 user_facing_name=name,
                 assigned_tools=assigned_tools or None,
                 temperature=0.25,
-                custom_system_prompt=self._build_sub_agent_system_prompt(
+                custom_system_prompt=PromptBuilder.sub_agent_system_prompt(
                     task_desc, assigned_tools
                 ),
                 depends_on=depends_on if depends_on not in (None, "null", "") else None,
@@ -463,7 +403,6 @@ class AgentFlow:
         if not state.task_id_map:
             return
 
-        # Get all currently launched but not yet completed task IDs
         pending_tasks = {
             task_id
             for task_id in state.task_id_map.values()
@@ -487,12 +426,10 @@ class AgentFlow:
     @workflow.step("orchestrator", name="check_orchestrator_complete")
     async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
         """Check if all planned tasks have been launched and completed."""
-        # All tasks must have been launched
         if state.current_task_index < len(state.planned_tasks):
             state.is_complete = False
             return
 
-        # All launched tasks must be finished
         all_done = all(
             self.agent.sub_tasks.get(tid, {}).get("status")
             in ("completed", "failed", "cancelled")
@@ -522,29 +459,20 @@ class AgentFlow:
             },
         )
 
-    # ==================== HELPERS (all preserved) ====================
+    # ==================== HELPERS ====================
 
     async def _generate_user_friendly_summary(self, state: AgentState) -> str:
+        """Generate natural summary after complex task using PromptBuilder directly."""
         tool_results_str = "\n".join(
             f"• {r['name']}: {str(r.get('result', ''))[:400]}"
             for r in self.agent.tool_results[-12:]
         )
 
-        prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
-
-    Task: {self.agent.state.task}
-    Goal: {self.agent.state.goal or "General deployment assistance"}
-
-    What was actually done (tool results):
-    {tool_results_str or "No tool results recorded."}
-
-    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
-    - Celebrate what was accomplished
-    - Mention any important outcomes or warnings
-    - End by saying we're back in normal chat mode and ask how else you can help
-
-    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
-    """
+        prompt = PromptBuilder.user_friendly_task_summary_prompt(
+            task=self.agent.state.task,
+            goal=self.agent.state.goal,
+            tool_results_str=tool_results_str,
+        )
 
         try:
             summary = await self.agent.client.chat(
@@ -559,4 +487,5 @@ class AgentFlow:
             )
 
     async def _generate_sub_agent_summary(self, state: AgentState) -> str:
+        """Simple fallback summary for sub-agents."""
         return "✅ Sub-task completed.\n\nKey results recorded in shared context."
