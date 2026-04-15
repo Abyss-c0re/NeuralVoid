@@ -1,7 +1,7 @@
 from neuralcore.actions.manager import tool
 from neuralcore.utils.os_info import get_os_info
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 import os
 import shutil
 
@@ -162,54 +162,71 @@ async def delete_directory(dir_path: str) -> str:
     tags=["filesystem", "search"],
     name="search_files",
     description=(
-        "Recursively search for files or directories by partial name match. "
-        "Supports glob-style wildcards (*) and returns full paths. "
-        "Use this to explore project structures, find specific files, or locate assets."
+        "Recursively search for files and/or directories by name or glob pattern. "
+        "Supports wildcards like '*.py', 'config*', or simple partial names. "
+        "Returns full absolute paths, sorted for readability. "
+        "Built for safe use in agents and multi-agent workflows."
     ),
-    require_confirmation=False,  # Set True if you want human gate for broad searches
+    require_confirmation=False,
 )
 async def search_files(
     path: str = ".",
     name: str = "*",
-    max_results: Optional[int] = 200,
+    max_results: Optional[Any] = 200,  # Accept Any to handle str/int from LLM
     include_dirs: bool = True,
     include_files: bool = True,
 ) -> str:
     """
-    Generic filesystem search tool.
-
-    - path: Starting directory (relative or absolute).
-    - name: Partial name or glob pattern (e.g. "*.py", "config*", "README").
-    - max_results: Safety limit to prevent overwhelming output on large trees.
-    - include_dirs / include_files: Filter what to return.
+    Generic, reusable filesystem search tool for NeuralCore.
+    No client-specific logic — pure utility.
     """
     try:
-        search_path = Path(path).resolve()
+        # Safe conversion of max_results (handles str from LLM, None, or int)
+        if max_results is None:
+            max_results = None
+        else:
+            try:
+                max_results = int(max_results)
+                if max_results <= 0:
+                    max_results = None
+            except ValueError:
+                max_results = 200  # fallback safe default
+
+        search_path = Path(path).expanduser().resolve()
         if not search_path.exists():
-            return f"Error: Path does not exist - {search_path}"
+            return f"Error: Path does not exist → {search_path}"
+
+        if not search_path.is_dir():
+            return f"Error: Path is not a directory → {search_path}"
 
         results: List[str] = []
-        pattern = f"*{name}*" if "*" not in name and "?" not in name and name else name
+        # Normalize pattern for rglob
+        pattern = (
+            f"*{name}*" if name and "*" not in name and "?" not in name else name or "*"
+        )
 
-        # Use pathlib.rglob for cleaner, more Pythonic recursive search (leverages scandir under the hood)
         for item in search_path.rglob(pattern):
             if (item.is_file() and include_files) or (item.is_dir() and include_dirs):
                 results.append(str(item))
 
-            if max_results and len(results) >= max_results:
-                results.append(f"... (truncated - {max_results} results limit reached)")
+            # Safe limit check
+            if max_results is not None and len(results) >= max_results:
+                results.append(
+                    f"... (truncated — reached max_results limit of {max_results})"
+                )
                 break
 
         if not results:
-            return f"(no matches for '{name}' in '{path}')"
+            return f"(no matches for pattern '{name}' in '{path}')"
 
-        # Return clean, sorted output for better agent readability
+        # Return clean, sorted, human+agent friendly output
         return "\n".join(sorted(results))
 
-    except PermissionError:
-        return f"Permission denied accessing path: {path}"
+    except PermissionError as e:
+        return f"Permission denied: {str(e)}"
+    except OSError as e:
+        return f"Filesystem error: {type(e).__name__} - {str(e)}"
     except Exception as e:
-        # Keep error messages concise and actionable for the agent
         return f"search_files error: {type(e).__name__} - {str(e)}"
 
 
