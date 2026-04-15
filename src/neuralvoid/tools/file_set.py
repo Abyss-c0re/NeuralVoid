@@ -4,7 +4,7 @@ import asyncio
 import aiofiles
 from PIL import Image
 from io import BytesIO
-from neuralcore.actions.manager import tool
+from neuralcore.actions.manager import tool, sequenced
 
 
 # ─────────────────────────────────────────────────────────────
@@ -264,3 +264,22 @@ async def regex_replace(
         return f"Replaced {count} occurrence(s) using regex in '{file_path}'"
     except Exception as e:
         return f"regex_replace error: {str(e)}"
+
+
+@sequenced(
+    name="find_and_read_file",
+    description="Search for a file by name and automatically read the first match",
+    set_name="FileEditingTools",
+    tags=["file", "search", "read", "workflow"],
+    propagate=False,
+    output_from="read_file",
+    dependencies={
+        "search_files": {"name": "input"},  # sequence input → search_files.name
+        "read_file": {
+            "file_path": "search_files"
+        },  # first line of search → read_file.file_path
+    },
+    steps=["search_files", "read_file"],
+)
+def find_and_read_file():
+    pass
