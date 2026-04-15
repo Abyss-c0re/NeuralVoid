@@ -165,7 +165,7 @@ def chat_safety_break(state: AgentState, args=None):
 
 
 # ==================== LOOPS ====================
-@workflow.loop("chat_task_loop", max_iterations=3, break_condition="chat_safety_break")
+@workflow.loop("chat_task_loop", max_iterations=None, break_condition="chat_safety_break")
 async def chat_task_loop(agent, state: AgentState, messages: List[Dict]):
     """Inner decorated task loop for chat"""
     async for ev, pl in agent.flow.executors.chat_loop(messages, state):
@@ -181,7 +181,7 @@ async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
         yield ev, pl
 
 
-@workflow.loop("chat_tool_loop", max_iterations=50, break_condition="goal_achieved")
+@workflow.loop("chat_tool_loop", max_iterations=None, break_condition="goal_achieved")
 async def chat_tool_loop(agent, state: AgentState):
     """Outer persistent chat loop"""
     while True:
