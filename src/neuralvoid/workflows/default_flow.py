@@ -14,11 +14,45 @@ logger = Logger.get_logger()
 
 
 async def _classify_intent(agent, query: str) -> str:
-    prompt = PromptBuilder.classify_intent(query)
+    """Enhanced intent classification using rich context from the agent's context manager.
+
+    Falls back gracefully and stays fast (low token usage).
+    """
+    if not query or not query.strip():
+        return "CASUAL"
+
     try:
-        result = await agent.client.chat(prompt, temperature=0.0, max_tokens=20)
-        return "CASUAL" if "CASUAL" in result.upper() else "TASK"
-    except Exception:
+        context_messages = await agent.context_manager.provide_context(
+            query=query,
+            max_input_tokens=8000,
+            reserved_for_output=512,
+            system_prompt="You are an expert at classifying user intent precisely and quickly.",
+            lightweight_agentic=True,
+            state=agent.state if hasattr(agent, "state") else None,
+            include_logs=True,
+            chat=True,  #
+        )
+
+        # Append the actual classification instruction as the final user message
+        classification_prompt = PromptBuilder.classify_intent(query)  #
+
+        if context_messages and context_messages[-1]["role"] == "user":
+            context_messages[-1]["content"] = classification_prompt
+        else:
+            context_messages.append({"role": "user", "content": classification_prompt})
+
+        result = await agent.client.chat(
+            context_messages,  # full list of messages (not just a string)
+            temperature=0.0,
+            max_tokens=20,
+        )
+
+        cleaned = result.strip().upper()
+        return "CASUAL" if "CASUAL" in cleaned else "TASK"
+
+    except Exception as e:
+        logger.warning(f"Enhanced classify_intent failed, falling back: {e}")
+        # Original lightweight fallback
         return "CASUAL" if len(query.split()) < 25 else "TASK"
 
 
