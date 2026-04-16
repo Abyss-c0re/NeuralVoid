@@ -10,9 +10,16 @@ from neuralcore.workflows.executors import AgentExecutors
 from neuralcore.utils.prompt_builder import PromptBuilder
 
 
-from typing import List, Dict
-
 logger = Logger.get_logger()
+
+
+async def _classify_intent(agent, query: str) -> str:
+    prompt = PromptBuilder.classify_intent(query)
+    try:
+        result = await agent.client.chat(prompt, temperature=0.0, max_tokens=20)
+        return "CASUAL" if "CASUAL" in result.upper() else "TASK"
+    except Exception:
+        return "CASUAL" if len(query.split()) < 25 else "TASK"
 
 
 # ==================== CONDITIONS ====================
@@ -166,59 +173,111 @@ def chat_safety_break(state: AgentState, args=None):
 
 # ==================== LOOPS ====================
 @workflow.loop(
-    "chat_task_loop", max_iterations=None, break_condition="chat_safety_break"
+    "goal_driven_loop", max_iterations=None, break_condition="chat_safety_break"
 )
-async def chat_task_loop(agent, state: AgentState, messages: List[Dict]):
+async def goal_driven_loop(agent, state: AgentState):
     """Inner decorated task loop for chat"""
-    async for ev, pl in agent.flow.executors.chat_loop(messages, state):
+    async for ev, pl in agent.flow.executors._goal_driven_task_loop(state):
         yield ev, pl
 
 
 @workflow.loop(
     "agentic_task_loop", max_iterations=12, break_condition="subtask_complete"
 )
-async def agentic_task_loop(agent, state: AgentState, iteration: int = 0):
+async def agentic_task_loop(
+    agent,
+    state: AgentState,
+):
     """Inner decorated task loop for sub-agents"""
-    async for ev, pl in agent.flow.executors.agentic_loop(iteration, state):
+    async for ev, pl in agent.flow.executors._goal_driven_task_loop(state):
         yield ev, pl
 
 
 @workflow.loop("chat_tool_loop", max_iterations=None, break_condition="goal_achieved")
 async def chat_tool_loop(agent, state: AgentState):
-    """Outer persistent chat loop — message preparation moved to AgentState."""
+    """
+    Stable outer persistent chat loop.
+    - One-time heavy registration at startup only.
+    - CASUAL → lightweight direct reply (no inner loop).
+    - TASK → delegate to goal_driven_loop **without** triggering full re-init.
+    """
+    logger.info("[CHAT TOOL LOOP] Outer loop started — persistent mode active")
+
     while True:
         try:
             raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
-            if getattr(agent, "_stop_event", None) and agent._stop_event.is_step():
+            if getattr(agent, "_stop_event", None) and agent._stop_event.is_set():
+                logger.info("[CHAT TOOL LOOP] Stop event received — breaking")
                 break
             continue
         except asyncio.CancelledError:
+            logger.info("[CHAT TOOL LOOP] Cancelled — breaking")
             break
 
         content = (
             raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
-        )
-        if not content.strip():
+        ).strip()
+
+        if not content:
             agent.message_queue.task_done()
             continue
 
-        messages = state.prepare_messages(
+        # Fresh per-turn preparation (reset only user/assistant history, keep tool results)
+        state.prepare_messages(
             content=content,
             system_prompt=PromptBuilder.deploy_chat_system_prompt(
                 goal=state.goal or "General assistance"
             ),
-            reset=True,  # fresh context for this turn in chat mode
+            reset=True,  # keep this — it's intentional for chat turns
         )
 
-        # Call the nested decorated inner loop with prepared messages
-        async for ev, pl in chat_task_loop(
-            agent,
-            state,
-            messages,  # now comes from state.prepare_messages
-        ):
-            yield ev, pl
+        intent = await _classify_intent(agent, content)
 
+        await agent.context_manager.add_message("user", content)
+        logger.info(f"[CHAT INTENT] {intent} | '{content[:100]}...'")
+
+        if intent == "CASUAL":
+            logger.info("[CASUAL MODE] Pure basic chat — no inner loop")
+            yield ("phase_changed", {"phase": "casual_chat"})
+
+            casual_messages = await agent.context_manager.provide_context(
+                query=content,
+                max_input_tokens=agent.max_tokens,
+                reserved_for_output=12000,
+                system_prompt=PromptBuilder.casual_system_prompt(),
+                include_logs=False,
+                chat=True,
+            )
+
+            final_reply = await agent.client.chat(
+                casual_messages, temperature=0.85, top_p=0.95
+            )
+
+            await agent.add_message("assistant", final_reply)
+            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
+
+            agent.message_queue.task_done()
+            continue
+
+        # === TASK-DRIVEN MODE ===
+        logger.info("[TASK-DRIVEN MODE] Delegating to goal_driven_loop")
+        yield ("phase_changed", {"phase": "goal_driven"})
+
+        # Critical: Use the already-registered inner loop — do NOT recreate engine
+        async for event, payload in agent.execute_loop(
+            "goal_driven_loop", initial_state=state
+        ):
+            # Forward all events from inner loop (planning, tool calls, final answer, etc.)
+            yield event, payload
+
+            # Optional: early break on inner safety conditions if needed
+            if event in ("error", "cancelled"):
+                break
+
+        logger.info(
+            "[TASK-DRIVEN MODE] Inner goal_driven_loop completed — back to outer chat"
+        )
         agent.message_queue.task_done()
 
 
