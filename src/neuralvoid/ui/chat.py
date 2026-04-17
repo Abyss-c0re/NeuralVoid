@@ -10,6 +10,7 @@ from textual.binding import Binding
 
 from neuralcore.agents.core import Agent
 from neuralcore.actions.registry import registry
+from neuralcore.utils.prompt_builder import PromptBuilder
 
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
@@ -259,7 +260,7 @@ class LLMChatApp(App):
             return
 
         display = (self._current_pure_text + self._current_tool_buffer).replace(
-            "[FINAL_ANSWER_COMPLETE]", ""
+            PromptBuilder.FINAL_ANSWER_MARKER, ""
         )
 
         if message.buffer != display:

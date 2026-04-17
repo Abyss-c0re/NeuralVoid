@@ -89,7 +89,7 @@ def goal_achieved(state: AgentState, args=None):
 
     # NEW: require either marker in some tool result or explicit_done when on last step
     marker_in_history = any(
-        "[FINAL_ANSWER_COMPLETE]" in str(r.get("result", ""))
+        PromptBuilder.FINAL_ANSWER_MARKER in str(r.get("result", ""))
         for r in state.tool_results
     )
 
@@ -112,7 +112,7 @@ def goal_achieved(state: AgentState, args=None):
 def subtask_complete(state: AgentState, args=None):
     """Break when sub-task is really done — stricter for multi-step."""
     full_reply = getattr(state, "full_reply", "").strip()
-    marker = "[FINAL_ANSWER_COMPLETE]"
+    marker = PromptBuilder.FINAL_ANSWER_MARKER
 
     has_marker = marker in full_reply
     explicit_done = any(
