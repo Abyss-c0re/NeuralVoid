@@ -268,9 +268,6 @@ async def chat_tool_loop(agent, state: AgentState):
 
         intent = await _classify_intent(agent, content)
 
-        await agent.context_manager.add_message("user", content)
-        logger.info(f"[CHAT INTENT] {intent} | '{content[:100]}...'")
-
         if intent == "CASUAL":
             logger.info("[CASUAL MODE] Pure basic chat — no inner loop")
             yield ("phase_changed", {"phase": "casual_chat"})
@@ -538,7 +535,7 @@ class AgentFlow:
 
         summary = await self._generate_user_friendly_summary(state)
         yield ("llm_response", {"full_reply": summary, "is_complete": True})
-        await self.agent.context_manager.add_message("assistant", summary)
+        await self.agent.add_message("assistant", summary)
 
         await self.agent.post_control(
             {"event": "switch_workflow", "name": "deploy_chat"}
