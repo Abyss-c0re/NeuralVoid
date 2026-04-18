@@ -238,23 +238,20 @@ async def chat_tool_loop(agent, state: AgentState):
     logger.info("[CHAT TOOL LOOP] Outer loop started — persistent mode active")
 
     while True:
-        try:
-            raw_msg = await asyncio.wait_for(agent.message_queue.get(), timeout=5.0)
-        except asyncio.TimeoutError:
+        raw_msg = await agent.wait_for_incoming_message(
+            timeout=5.0
+        )  # ← this is the only change
+
+        if raw_msg is None:
             if getattr(agent, "_stop_event", None) and agent._stop_event.is_set():
-                logger.info("[CHAT TOOL LOOP] Stop event received — breaking")
                 break
             continue
-        except asyncio.CancelledError:
-            logger.info("[CHAT TOOL LOOP] Cancelled — breaking")
-            break
 
         content = (
             raw_msg.get("content", "") if isinstance(raw_msg, dict) else str(raw_msg)
         ).strip()
 
         if not content:
-            agent.message_queue.task_done()
             continue
 
         # Fresh per-turn preparation (reset only user/assistant history, keep tool results)
