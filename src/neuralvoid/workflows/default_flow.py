@@ -2,58 +2,21 @@ import json
 import asyncio
 
 from enum import Enum
+
 from neuralcore.agents.state import AgentState
 
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
-from neuralcore.workflows.executors import AgentExecutors
-from neuralcore.utils.prompt_builder import PromptBuilder
 
+from neuralcore.utils.prompt_builder import PromptBuilder
+from neuralcore.workflows.executors import (
+    ensure_subtasks_planned,
+    goal_driven_task_loop,
+    classify_intent,
+    is_multi_step_task,
+)
 
 logger = Logger.get_logger()
-
-
-async def _classify_intent(agent, query: str) -> str:
-    """Enhanced intent classification using rich context from the agent's context manager.
-
-    Falls back gracefully and stays fast (low token usage).
-    """
-    if not query or not query.strip():
-        return "CASUAL"
-
-    try:
-        context_messages = await agent.context_manager.provide_context(
-            query=query,
-            max_input_tokens=8000,
-            reserved_for_output=512,
-            system_prompt="You are an expert at classifying user intent precisely and quickly.",
-            lightweight_agentic=True,
-            state=agent.state if hasattr(agent, "state") else None,
-            include_logs=True,
-            chat=True,  #
-        )
-
-        # Append the actual classification instruction as the final user message
-        classification_prompt = PromptBuilder.classify_intent(query)  #
-
-        if context_messages and context_messages[-1]["role"] == "user":
-            context_messages[-1]["content"] = classification_prompt
-        else:
-            context_messages.append({"role": "user", "content": classification_prompt})
-
-        result = await agent.client.chat(
-            context_messages,  # full list of messages (not just a string)
-            temperature=0.0,
-            max_tokens=20,
-        )
-
-        cleaned = result.strip().upper()
-        return "CASUAL" if "CASUAL" in cleaned else "TASK"
-
-    except Exception as e:
-        logger.warning(f"Enhanced classify_intent failed, falling back: {e}")
-        # Original lightweight fallback
-        return "CASUAL" if len(query.split()) < 25 else "TASK"
 
 
 # ==================== CONDITIONS ====================
@@ -155,79 +118,31 @@ def max_action_restarts_reached(state: AgentState, args=None):
     return getattr(state, "action_restarts", 0) >= max_allowed
 
 
-@workflow.condition("chat_safety_break")
-def chat_safety_break(state: AgentState, args=None):
-    """
-    Combined safety condition for chat loops.
-    Returns True if ANY safety limit is reached.
-    Logs exactly what caused the break.
-    """
-    reasons = []
-
-    # 1. Check has_final_reply (normal good case)
-    full_reply = getattr(state, "full_reply", "").strip()
-    has_tools = bool(
-        getattr(state, "tool_calls", None) and len(getattr(state, "tool_calls", [])) > 0
-    )
-    has_final = bool(full_reply) and not has_tools and len(full_reply) > 15
-
-    if has_final:
-        reasons.append("has_final_reply")
-
-    # 2. Per-turn tool calls
-    max_tool_per_turn = (
-        args.get("max_tool_per_turn", 10) if isinstance(args, dict) else 10
-    )
-    tool_calls = getattr(state, "tool_calls", None) or []
-    if len(tool_calls) >= max_tool_per_turn:
-        reasons.append(f"max_tool_calls_reached({len(tool_calls)}/{max_tool_per_turn})")
-
-    # 3. Too many empty loops
-    max_empty = args.get("max_empty", 5) if isinstance(args, dict) else 5
-    empty_loops = getattr(state, "empty_loops", 0)
-    if empty_loops >= max_empty:
-        reasons.append(f"too_many_empty_loops({empty_loops}/{max_empty})")
-
-    # 4. Too many action restarts
-    max_restarts = args.get("max_restarts", 8) if isinstance(args, dict) else 8
-    action_restarts = getattr(state, "action_restarts", 0)
-    if action_restarts >= max_restarts:
-        reasons.append(f"max_action_restarts_reached({action_restarts}/{max_restarts})")
-
-    # Log what actually caused the break
-    if reasons:
-        reason_str = " + ".join(reasons)
-        logger.info(
-            f"[SAFETY BREAK] Triggered by: {reason_str} | full_reply_len={len(full_reply)}"
-        )
-        return True
-
-    return False
-
-
 # ==================== LOOPS ====================
-@workflow.loop(
-    "goal_driven_loop", max_iterations=None, break_condition="chat_safety_break"
-)
+@workflow.loop("goal_driven_loop", max_iterations=None, break_condition="goal_achieved")
 async def goal_driven_loop(agent, state: AgentState):
     """Inner decorated task loop for chat"""
-    async for ev, pl in agent.flow.executors._goal_driven_task_loop(state):
+
+    yield ("phase_changed", {"phase": "thinking"})
+
+    # ====================== ONE-TIME PLANNING ======================
+    if not state.planned_tasks:
+        agent.manager.unload_all()
+        is_multi_step = await is_multi_step_task(agent, state.task)
+        if is_multi_step:
+            logger.info("[MULTI-STEP] Detected → structured planning")
+            yield ("phase_changed", {"phase": "planning"})
+            async for ev, pl in ensure_subtasks_planned(agent, state):
+                yield ev, pl
+        else:
+            state.planned_tasks = [state.task]
+            state.task_expected_outcomes = ["Task completed successfully"]
+
+    async for ev, pl in goal_driven_task_loop(agent, state, "goal_driven_loop"):
         yield ev, pl
 
 
-@workflow.loop(
-    "agentic_task_loop", max_iterations=12, break_condition="subtask_complete"
-)
-async def agentic_task_loop(
-    agent,
-    state: AgentState,
-):
-    """Inner decorated task loop for sub-agents"""
-    async for ev, pl in agent.flow.executors._goal_driven_task_loop(state):
-        yield ev, pl
-
-
-@workflow.loop("chat_tool_loop", max_iterations=None, break_condition="goal_achieved")
+@workflow.loop("chat_tool_loop", max_iterations=None)
 async def chat_tool_loop(agent, state: AgentState):
     """
     Stable outer persistent chat loop.
@@ -243,9 +158,9 @@ async def chat_tool_loop(agent, state: AgentState):
         role="user", return_content_only=True
     )
 
-    intent = await _classify_intent(agent, content)
+    intent = await classify_intent(agent, content)
 
-    if intent == "CASUAL":
+    if intent == "CASUAL" and content:
         logger.info("[CASUAL MODE] Pure basic chat — no inner loop")
         yield ("phase_changed", {"phase": "casual_chat"})
 
@@ -277,7 +192,6 @@ async def chat_tool_loop(agent, state: AgentState):
     logger.info("[TASK-DRIVEN MODE] Delegating to goal_driven_loop")
     yield ("phase_changed", {"phase": "goal_driven"})
     state.reset_for_new_task(new_task=content)
-    state.planned_tasks = []
 
     # Forward inner loop events
     async for event, payload in agent.execute_loop(
@@ -302,13 +216,6 @@ async def chat_tool_loop(agent, state: AgentState):
     )
 
 
-@workflow.loop("agentic_loop", max_iterations=30, break_condition="subtask_complete")
-async def agentic_loop(agent, state: AgentState):
-    """Outer agentic loop"""
-    async for ev, pl in agentic_task_loop(agent, state, iteration=0):
-        yield ev, pl
-
-
 # ==================== MAIN FLOWS ====================
 class AgentFlow:
     class Phase(str, Enum):
@@ -322,8 +229,6 @@ class AgentFlow:
     def __init__(self, agent):
         self.agent = agent
         self.engine = agent.workflow
-        self.executors = AgentExecutors(agent, self.Phase)
-        self.agent.flow = self
         workflow.bind_to_engine(self.engine, instance=self)
 
     # ==================== WORKFLOWS ====================
@@ -336,27 +241,17 @@ class AgentFlow:
             yield ("phase_changed", {"phase": "chat"})
             logger.info(f"Agent '{self.agent.name}' → Chat mode started")
 
-        while True:
-            if (
-                getattr(self.agent, "_stop_event", None)
-                and self.agent.stop_event.is_step()
-            ):
-                yield ("cancelled", "User requested stop")
-                break
-
             # Use the outer decorated loop
-            async for ev, pl in self.agent.execute_loop(
-                "chat_tool_loop", initial_state=state
-            ):
-                yield ev, pl
-
-            await asyncio.sleep(0.01)
+        async for ev, pl in self.agent.execute_loop(
+            "chat_tool_loop", initial_state=state
+        ):
+            yield ev, pl
 
     @workflow.step("sub_agent_execute", name="llm_stream")
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
         """Sub-agent execution step"""
         async for ev, pl in self.agent.execute_loop(
-            "agentic_loop", initial_state=state
+            "goal_driven_loop", initial_state=state
         ):
             if ev == "llm_response" and isinstance(pl, dict):
                 state.full_reply = pl.get("full_reply", "")
