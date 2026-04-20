@@ -1,4 +1,4 @@
-from neuralcore.actions.registry import tool, sequenced
+from neuralcore.actions.registry import tool
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
@@ -107,21 +107,3 @@ async def search_web_and_index(agent, query: str, max_results: int = 3) -> str:
                 indexed += 1
     return f"✅ Searched '{query}' and indexed {indexed} pages"
 
-
-@sequenced(
-    name="research_topic",
-    description="Quick & reliable research: search + auto-index + summary.",
-    set_name="WebTools",
-    tags=["web", "research", "index", "kb", "workflow"],
-    propagate=True,
-    output_from="GetContext",
-    dependencies={
-        "search_web_and_index": {"query": "input", "max_results": "max_results"},
-        "GetContext": {
-            "query": "input",
-        },
-    },
-    steps=["search_web_and_index", "GetContext"],
-)
-def research_topic():
-    pass

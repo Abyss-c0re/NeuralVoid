@@ -23,12 +23,12 @@ clients:
       - target: ask
         name: quick_answer
         description: "Fast single-turn answer"
-        tags: ["fast", "qa", "cheap"]
+        tags: [ "fast", "qa", "cheap" ]
 
       - target: chat
         name: short_chat
         description: "Short conversational response"
-        tags: ["chat", "fast"]
+        tags: [ "chat", "fast" ]
 
   reasoning:
     type: chat
@@ -53,12 +53,12 @@ clients:
       - target: ask
         name: deep_think
         description: "Careful multi-step reasoning for complex problems"
-        tags: ["reasoning", "planning", "slow", "accurate"]
+        tags: [ "reasoning", "planning", "slow", "accurate" ]
 
       - target: chat
         name: structured_reasoning
         description: "Multi-turn structured reasoning conversation"
-        tags: ["reasoning", "chat", "analysis"]
+        tags: [ "reasoning", "chat", "analysis" ]
 
     # embeddings:
     #   type: embeddings
@@ -83,9 +83,10 @@ tools:
   WebTools:
     modules:
       - web_set
-  ContextManager:
-    #build in
-      
+  ResearchTools:
+    modules:
+      - research_set
+
 workflows:
   deploy_chat:
     name: "deploy_chat"
@@ -129,6 +130,7 @@ agents:
       - TerminalTools
       - CodingTools
       - WebTools
+      - ResearchTools
     workflow: orchestrator
 
   agent_002:
@@ -147,6 +149,7 @@ agents:
       - TerminalTools
       - CodingTools
       - WebTools
+      - ResearchTools
     workflow: deploy_chat
 
   sub_agent_002:
@@ -163,6 +166,8 @@ agents:
     tool_sets:
       - FileEditingTools
       - TerminalTools
+      - ResearchTools
+
     workflow: sub_agent_execute
 
 # Optional: Global defaults / settings
