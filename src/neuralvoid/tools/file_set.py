@@ -1,12 +1,12 @@
 import os
-import base64
 import asyncio
 import aiofiles
-from contextlib import asynccontextmanager
-from PIL import Image
-from io import BytesIO
+
+from typing import AsyncIterable
 from neuralcore.actions.registry import tool, sequenced
-from typing import AsyncIterable, List
+
+from neuralvoid.utils.file_helpers import _read_file
+
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
@@ -67,171 +67,14 @@ async def replace_block(
     "FileEditingTools",
     tags=["file", "read"],
     name="read_file",
-    description="Read full content of a text file. Streams large files in 8KB chunks.",
+    description="Universal file reader. Automatically detects type and streams large files. "
+    "Supports: .txt, .md, .py, .pdf, .docx, .png, .jpg, .jpeg, .webp, etc.",
 )
-async def read_file(file_path: str) -> str | AsyncIterable[str]:
-    """Optimized streaming for large text files.
-    Uses asynccontextmanager to keep the file open for the full lifetime of the generator."""
-    try:
-        if not os.path.isfile(file_path):
-            return f"Error: File '{file_path}' not found."
+async def read_file(
+    agent, file_path: str, image_prompt: str = "Describe this image in detail."
+) -> str | AsyncIterable[str]:
 
-        # Small file → fast non-streaming path (no generator overhead)
-        async with aiofiles.open(
-            file_path, "r", encoding="utf-8", errors="ignore"
-        ) as f:
-            preview = await f.read(4096)
-            if len(preview) < 4096:
-                return preview
-
-        # Large file → streaming path with proper resource management
-        @asynccontextmanager
-        async def open_file():
-            async with aiofiles.open(
-                file_path, "r", encoding="utf-8", errors="ignore"
-            ) as f:
-                yield f
-
-        async def stream_file() -> AsyncIterable[str]:
-            async with open_file() as f:  # ← Properly typed async context
-                # First chunk (reuse the preview logic if you want)
-                chunk = await f.read(4096)
-                if chunk:
-                    yield chunk
-
-                while True:
-                    chunk = await f.read(8192)
-                    if not chunk:
-                        break
-                    yield chunk
-
-        return stream_file()
-
-    except Exception as e:
-        logger.error(f"read_file error for '{file_path}': {e}", exc_info=True)
-        return f"Error reading '{file_path}': {str(e)}"
-
-
-@tool(
-    "FileEditingTools",
-    tags=["file", "read", "pdf"],
-    name="read_pdf",
-    description="Extract all text from a PDF file.",
-)
-async def read_pdf(file_path: str) -> str | AsyncIterable[str]:
-    """Optimized PDF streaming: batches pages for speed + good embedding size."""
-    try:
-        from pypdf import PdfReader
-
-        if not os.path.isfile(file_path):
-            return f"Error: PDF '{file_path}' not found."
-
-        reader = PdfReader(file_path)
-        total_pages = len(reader.pages)
-
-        if total_pages <= 8:
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-            return text.strip() or "No text extracted."
-
-        # Large PDF → batch 5 pages per yield (good balance)
-        async def stream_pdf():
-            batch: List[str] = []
-            batch_size = 10
-
-            for i, page in enumerate(reader.pages):
-                page_text = page.extract_text() or ""
-                if page_text.strip():
-                    batch.append(f"--- Page {i + 1}/{total_pages} ---\n{page_text}\n")
-
-                if len(batch) >= batch_size or i == total_pages - 1:
-                    if batch:
-                        yield "".join(batch)
-                    batch.clear()
-
-                if i % batch_size == 0:
-                    await asyncio.sleep(0)
-
-        # Pass metadata hint to the streaming handler
-        return stream_pdf()
-
-        return stream_pdf()
-
-    except Exception as e:
-        return f"Error reading PDF '{file_path}': {str(e)}"
-
-
-@tool(
-    "FileEditingTools",
-    tags=["file", "read", "docx"],
-    name="read_docx",
-    description="Extract all text from a DOCX file.",
-)
-async def read_docx(file_path: str) -> str | AsyncIterable[str]:
-    """Optimized DOCX streaming."""
-    try:
-        from docx import Document
-
-        if not os.path.isfile(file_path):
-            return f"Error: DOCX '{file_path}' not found."
-
-        doc = Document(file_path)
-        paragraphs = list(doc.paragraphs)
-
-        if len(paragraphs) <= 60:
-            text = "\n".join(para.text for para in paragraphs)
-            return text.strip() or "No text extracted."
-
-        async def stream_docx():
-            batch: List[str] = []
-            batch_size = 25  # ~reasonable size for embedding
-
-            for i, para in enumerate(paragraphs):
-                if para.text.strip():
-                    batch.append(para.text + "\n")
-
-                if len(batch) >= batch_size or i == len(paragraphs) - 1:
-                    if batch:
-                        yield "".join(batch)
-                    batch.clear()
-
-                if i % batch_size == 0:
-                    await asyncio.sleep(0)
-
-        return stream_docx()
-
-    except Exception as e:
-        return f"Error reading DOCX '{file_path}': {str(e)}"
-
-
-@tool(
-    "FileEditingTools",
-    tags=["file", "read", "image", "vision"],
-    name="read_image",
-    description="Describe image content using vision model.",
-)
-async def read_image(
-    agent, file_path: str, prompt: str = "Describe this image in detail."
-) -> str:
-    # Vision tools stay non-streaming (result is compact)
-    try:
-        if not os.path.isfile(file_path):
-            return f"Error: File '{file_path}' not found."
-        loop = asyncio.get_running_loop()
-
-        def _encode():
-            with Image.open(file_path) as img:
-                img.thumbnail((1024, 1024))
-                buffer = BytesIO()
-                img.save(buffer, format="PNG")
-                return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-        base64_img = await loop.run_in_executor(None, _encode)
-        description = await agent.client.describe_image(
-            image_base64=base64_img, prompt=prompt
-        )
-        return f"Image description: {description}"
-    except Exception as e:
-        return f"Error processing image '{file_path}': {str(e)}"
+    return await _read_file(agent, file_path, image_prompt)
 
 
 @tool(
