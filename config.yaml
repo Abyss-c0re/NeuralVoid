@@ -181,3 +181,5 @@ app:
   log_file: ~/.neuralcore/neuralvoid.log
   tool_info_level: compact
   models_dir: ~/.neuralcore/models
+  cognition:
+    novelty_threshold: 0.82
