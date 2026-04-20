@@ -1,6 +1,10 @@
+import json
 import asyncio
 from neuralcore.actions.registry import tool
 from neuralcore.utils.prompt_builder import PromptBuilder
+from neuralcore.utils.logger import Logger
+
+logger = Logger.get_logger()
 
 
 @tool(
@@ -10,7 +14,7 @@ from neuralcore.utils.prompt_builder import PromptBuilder
     tags=["context", "research", "investigate", "tool_results", "memory"],
 )
 async def provide_context(agent, query: str):
-    return await agent.provide_context(
+    return await agent.context_manager.provide_context(
         query=query,
         research_mode=True,
         return_as_string=True,
@@ -29,21 +33,25 @@ async def provide_context(agent, query: str):
 )
 async def perform_analysis(agent, query: str):
     if not query or not query.strip():
+        logger.warning("PerformAnalysis called with empty query")
         return "Error: Analysis query cannot be empty."
 
+    logger.info(f"PerformAnalysis started | query='{query[:100]}...'")
+
     # Step 1: Use PromptBuilder to generate multiple diverse search queries
+    logger.debug("Generating multiple diverse search queries via PromptBuilder")
     multi_query_prompt = PromptBuilder.analysis_multi_query_generation(query)
-    multi_query_response = await agent.client.ask(multi_query_prompt)
+    multi_query_response = await agent.client.chat(messages=multi_query_prompt)
+    logger.debug(f"Received multi-query response (length={len(multi_query_response)})")
 
     # Parse the response into a list of queries (expecting JSON array or numbered list)
     try:
-        import json
-
         queries = json.loads(multi_query_response)
         if not isinstance(queries, list):
             queries = [q.strip() for q in multi_query_response.split("\n") if q.strip()]
-    except Exception:
-        # Fallback: simple line split
+        logger.debug(f"Parsed {len(queries)} queries from JSON response")
+    except Exception as parse_err:
+        logger.warning(f"Failed to parse JSON, falling back to line split: {parse_err}")
         queries = [
             q.strip()
             for q in multi_query_response.split("\n")
@@ -54,18 +62,28 @@ async def perform_analysis(agent, query: str):
     queries = queries[:6]
     if not queries:
         queries = [query]  # fallback to original
+        logger.debug("No queries parsed, using original query as fallback")
+
+    logger.info(f"Generated {len(queries)} sub-queries for analysis")
 
     # Step 2: Accumulate results from SearchToolResults for each generated query
     all_research = []
     for sub_query in queries:
+        logger.debug(f"Executing SearchToolResults for sub-query: {sub_query[:80]}...")
         try:
-            result = await agent.dynamic_manager.execute_direct(
+            result = await agent.manager.execute_direct(
                 "SearchToolResults",
                 query=sub_query,
             )
             if result and str(result).strip():
                 all_research.append(f"--- Search for: {sub_query} ---\n{result}\n")
+                logger.debug(f"Retrieved {len(str(result))} chars for sub-query")
+            else:
+                logger.debug(f"No results returned for sub-query: {sub_query[:50]}...")
         except Exception as e:
+            logger.error(
+                f"Failed to execute SearchToolResults for '{sub_query[:50]}...': {e}"
+            )
             all_research.append(
                 f"--- Search for: {sub_query} ---\n[Error retrieving: {e}]\n"
             )
@@ -73,10 +91,15 @@ async def perform_analysis(agent, query: str):
     combined_research = (
         "\n".join(all_research) if all_research else "No relevant tool outcomes found."
     )
+    logger.debug(f"Combined research context length: {len(combined_research)} chars")
 
     # Step 3: Instruct LLM to generate a structured report
+    logger.debug("Synthesizing final structured report via LLM")
     report_prompt = PromptBuilder.analysis_report_synthesis(query, combined_research)
-    final_report = await agent.client.ask(report_prompt)
+    final_report = await agent.client.chat(messages=report_prompt)
+    logger.info(
+        f"PerformAnalysis completed successfully | report_length={len(final_report)} chars"
+    )
 
     return final_report
 
@@ -93,22 +116,29 @@ async def perform_analysis(agent, query: str):
 async def research_web(agent, query: str, max_results: int = 5):
     """Research a topic on the web and deliver a synthesized analysis report."""
     if not query or not query.strip():
+        logger.warning("ResearchWeb called with empty query")
         return "Error: Research query cannot be empty."
 
+    logger.info(
+        f"ResearchWeb started | query='{query[:100]}...' | max_results={max_results}"
+    )
+
     # Step 1: Perform web search (do NOT use results directly — let them go into context via indexing)
-    search_text = await agent.dynamic_manager.execute_direct(
+    logger.debug("Performing web search via search_web tool")
+    search_text = await agent.manager.execute_direct(
         "search_web",
         query=query,
         max_results=max_results,
     )
+    logger.debug(f"Web search completed | results_length={len(search_text)} chars")
 
     # Step 2: Index the top results into the knowledge base (so they become tool outcomes)
+    indexed_count = 0
     if (
         not search_text.startswith("search_web error")
         and "(no results)" not in search_text.lower()
     ):
         lines = search_text.split("\n\n")
-        indexed_count = 0
         for line in lines[:max_results]:
             try:
                 if "http" in line.lower():
@@ -116,22 +146,31 @@ async def research_web(agent, query: str, max_results: int = 5):
                     if len(parts) > 1:
                         url = parts[1].strip()
                         if url.startswith("http"):
-                            await agent.dynamic_manager.execute_direct(
+                            logger.debug(f"Indexing web page: {url[:80]}...")
+                            await agent.manager.execute_direct(
                                 "index_web_page",
                                 url=url,
                             )
                             indexed_count += 1
-            except Exception:
+            except Exception as idx_err:
+                logger.error(f"Failed to index URL from search results: {idx_err}")
                 continue  # silent fail on individual indexing
 
         if indexed_count > 0:
+            logger.info(f"Indexed {indexed_count} web pages into knowledge base")
             # Small pause to allow indexing to settle into KB
             await asyncio.sleep(0.3)
+    else:
+        logger.warning(
+            f"Web search failed or returned no usable results: {search_text[:100]}..."
+        )
 
     # Step 3: Perform deep analysis using the new indexed web content + existing tool outcomes
-    analysis_report = await agent.dynamic_manager.execute_direct(
+    logger.debug("Triggering PerformAnalysis on web research results + existing KB")
+    analysis_report = await agent.manager.execute_direct(
         "PerformAnalysis",
         query=f"Web research on: {query}. Analyze all recent tool outcomes including newly indexed web pages.",
     )
-
-    return analysis_report
+    logger.info(
+        f"ResearchWeb completed successfully | final_report_length={len(analysis_report)} chars"
+    )
