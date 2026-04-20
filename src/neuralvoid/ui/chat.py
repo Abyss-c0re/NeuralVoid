@@ -220,7 +220,7 @@ class LLMChatApp(App):
                 max_tokens=self.max_tokens,
                 chat_mode=True,
             ):
-                logger.debug(f"[UI] Event: {event_type}")
+                #logger.debug(f"[UI] Event: {event_type}")
 
                 if event_type in (
                     "content_delta",
@@ -304,6 +304,14 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
+        elif event_type == "tool_name":           # ← ADD THIS BLOCK
+            name = payload.get("name", "unknown")
+            message.update_status(
+                f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
+            )
+            self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            return
+
         elif event_type == "step_failed":
             error = payload.get("error", "Unknown error")
             self._current_pure_text += f"\n❌ **Step failed**\n{error}\n\n"
@@ -336,71 +344,6 @@ class LLMChatApp(App):
                 self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
-        elif event_type == "tool_call_delta":
-            func = payload.get("function", {})
-            name = func.get("name") or payload.get("name") or "unknown"
-            args_str = func.get("arguments") or payload.get("arguments_delta") or ""
-
-            try:
-                args_dict = json.loads(args_str) if args_str.strip() else {}
-            except Exception:
-                args_dict = {"_partial": args_str}
-
-            md = _build_tool_markdown(
-                name=name,
-                args=args_dict,
-                level=level,
-                result=None,
-                confirmation=None,
-                error=False,
-            )
-            self._current_tool_buffer += md
-            await self._ui_update(message, immediate=True)
-
-            message.update_status(
-                f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
-            )
-            self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
-            return
-
-        elif event_type == "tool_calls":
-            count = len(payload) if isinstance(payload, (list, tuple)) else "?"
-            message.update_status(f"Executing {count} tool(s)...")
-            return
-
-        elif event_type == "tool_start":
-            name = payload.get("name", "unknown")
-            args = payload.get("args", {})
-            md = _build_tool_markdown(
-                name=name,
-                args=args,
-                level=level,
-                result=None,
-                confirmation=None,
-                error=False,
-            )
-            self._current_tool_buffer += md
-            await self._ui_update(message, immediate=True)
-            return
-
-        elif event_type == "tool_result":
-            name = payload.get("name", "unknown")
-            result = str(payload.get("result", ""))
-            error = payload.get("error", False)
-
-            md = _build_tool_markdown(
-                name=name,
-                args=payload.get("args", {}),
-                result=result,
-                level=level,
-                error=error,
-            )
-            self._current_tool_buffer += md
-            await self._ui_update(message, immediate=True)
-
-            status = "❌ failed" if error else "completed"
-            message.update_status(f"Tool **{name}** {status}")
-            return
 
         elif event_type == "needs_confirmation":
             tool_name = payload.get("name", "unknown")
@@ -419,12 +362,6 @@ class LLMChatApp(App):
             self.waiting_for_confirmation = True
             return
 
-        elif event_type == "reflection_triggered":
-            self._current_pure_text += (
-                f"\n\n🤔 **Self-Reflection**\n{payload.strip()}\n\n"
-            )
-            await self._ui_update(message, immediate=True)
-            return
 
         elif event_type == "final_summary":
             self._current_pure_text += f"\n\n{payload}\n"
