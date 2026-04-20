@@ -2,13 +2,17 @@ import os
 import base64
 import asyncio
 import aiofiles
+from contextlib import asynccontextmanager
 from PIL import Image
 from io import BytesIO
 from neuralcore.actions.registry import tool, sequenced
+from typing import AsyncIterable, List
+from neuralcore.utils.logger import Logger
 
+logger = Logger.get_logger()
 
 # ─────────────────────────────────────────────────────────────
-# File Editing Tools (ALL ASYNC)
+# File Editing Tools – Optimized for Streaming + Batching
 # ─────────────────────────────────────────────────────────────
 
 
@@ -63,17 +67,48 @@ async def replace_block(
     "FileEditingTools",
     tags=["file", "read"],
     name="read_file",
-    description="Read full content of a text file.",
+    description="Read full content of a text file. Streams large files in 8KB chunks.",
 )
-async def read_file(file_path: str) -> str:
+async def read_file(file_path: str) -> str | AsyncIterable[str]:
+    """Optimized streaming for large text files.
+    Uses asynccontextmanager to keep the file open for the full lifetime of the generator."""
     try:
+        if not os.path.isfile(file_path):
+            return f"Error: File '{file_path}' not found."
+
+        # Small file → fast non-streaming path (no generator overhead)
         async with aiofiles.open(
             file_path, "r", encoding="utf-8", errors="ignore"
         ) as f:
-            return await f.read()
-    except FileNotFoundError:
-        return f"Error: File '{file_path}' not found."
+            preview = await f.read(4096)
+            if len(preview) < 4096:
+                return preview
+
+        # Large file → streaming path with proper resource management
+        @asynccontextmanager
+        async def open_file():
+            async with aiofiles.open(
+                file_path, "r", encoding="utf-8", errors="ignore"
+            ) as f:
+                yield f
+
+        async def stream_file() -> AsyncIterable[str]:
+            async with open_file() as f:  # ← Properly typed async context
+                # First chunk (reuse the preview logic if you want)
+                chunk = await f.read(4096)
+                if chunk:
+                    yield chunk
+
+                while True:
+                    chunk = await f.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return stream_file()
+
     except Exception as e:
+        logger.error(f"read_file error for '{file_path}': {e}", exc_info=True)
         return f"Error reading '{file_path}': {str(e)}"
 
 
@@ -83,13 +118,44 @@ async def read_file(file_path: str) -> str:
     name="read_pdf",
     description="Extract all text from a PDF file.",
 )
-async def read_pdf(file_path: str) -> str:
+async def read_pdf(file_path: str) -> str | AsyncIterable[str]:
+    """Optimized PDF streaming: batches pages for speed + good embedding size."""
     try:
         from pypdf import PdfReader
 
+        if not os.path.isfile(file_path):
+            return f"Error: PDF '{file_path}' not found."
+
         reader = PdfReader(file_path)
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        return text.strip() or "No text extracted."
+        total_pages = len(reader.pages)
+
+        if total_pages <= 8:
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            return text.strip() or "No text extracted."
+
+        # Large PDF → batch 5 pages per yield (good balance)
+        async def stream_pdf():
+            batch: List[str] = []
+            batch_size = 10
+
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    batch.append(f"--- Page {i + 1}/{total_pages} ---\n{page_text}\n")
+
+                if len(batch) >= batch_size or i == total_pages - 1:
+                    if batch:
+                        yield "".join(batch)
+                    batch.clear()
+
+                if i % batch_size == 0:
+                    await asyncio.sleep(0)
+
+        # Pass metadata hint to the streaming handler
+        return stream_pdf()
+
+        return stream_pdf()
+
     except Exception as e:
         return f"Error reading PDF '{file_path}': {str(e)}"
 
@@ -100,13 +166,39 @@ async def read_pdf(file_path: str) -> str:
     name="read_docx",
     description="Extract all text from a DOCX file.",
 )
-async def read_docx(file_path: str) -> str:
+async def read_docx(file_path: str) -> str | AsyncIterable[str]:
+    """Optimized DOCX streaming."""
     try:
         from docx import Document
 
+        if not os.path.isfile(file_path):
+            return f"Error: DOCX '{file_path}' not found."
+
         doc = Document(file_path)
-        text = "\n".join(para.text for para in doc.paragraphs)
-        return text.strip() or "No text extracted."
+        paragraphs = list(doc.paragraphs)
+
+        if len(paragraphs) <= 60:
+            text = "\n".join(para.text for para in paragraphs)
+            return text.strip() or "No text extracted."
+
+        async def stream_docx():
+            batch: List[str] = []
+            batch_size = 25  # ~reasonable size for embedding
+
+            for i, para in enumerate(paragraphs):
+                if para.text.strip():
+                    batch.append(para.text + "\n")
+
+                if len(batch) >= batch_size or i == len(paragraphs) - 1:
+                    if batch:
+                        yield "".join(batch)
+                    batch.clear()
+
+                if i % batch_size == 0:
+                    await asyncio.sleep(0)
+
+        return stream_docx()
+
     except Exception as e:
         return f"Error reading DOCX '{file_path}': {str(e)}"
 
@@ -120,6 +212,7 @@ async def read_docx(file_path: str) -> str:
 async def read_image(
     agent, file_path: str, prompt: str = "Describe this image in detail."
 ) -> str:
+    # Vision tools stay non-streaming (result is compact)
     try:
         if not os.path.isfile(file_path):
             return f"Error: File '{file_path}' not found."
@@ -149,61 +242,68 @@ async def read_image(
 )
 async def read_folder(
     folder_path: str, recursive: bool = True, max_files: int = 30
-) -> str:
-    """Read folder and return structure + content preview of text files."""
+) -> str | AsyncIterable[str]:
+    """Optimized streaming folder output."""
     if not os.path.isdir(folder_path):
         return f"Error: Folder '{folder_path}' not found."
 
-    lines = [f"📂 Folder: {os.path.abspath(folder_path)}"]
-    files_read = 0
+    async def stream_folder():
+        yield f"📂 Folder: {os.path.abspath(folder_path)}\n"
+        files_read = 0
 
-    for root, dirs, files in os.walk(folder_path):
-        if not recursive:
-            dirs.clear()
+        for root, dirs, files in os.walk(folder_path):
+            if not recursive:
+                dirs.clear()
 
-        rel_path = os.path.relpath(root, folder_path)
-        indent = "  " * (rel_path.count(os.sep) + 1) if rel_path != "." else "  "
+            rel_path = os.path.relpath(root, folder_path)
+            indent = "  " * (rel_path.count(os.sep) + 1) if rel_path != "." else "  "
 
-        if rel_path != ".":
-            lines.append(f"{indent}📁 {os.path.basename(root)}/")
+            if rel_path != ".":
+                yield f"{indent}📁 {os.path.basename(root)}/\n"
 
-        for f in sorted(files):
-            file_path = os.path.join(root, f)
-            lines.append(f"{indent}📄 {f}")
+            for f in sorted(files):
+                file_path = os.path.join(root, f)
+                yield f"{indent}📄 {f}\n"
 
-            # Read small text files for preview
-            if files_read < max_files and any(
-                f.lower().endswith(ext)
-                for ext in [
-                    ".txt",
-                    ".md",
-                    ".py",
-                    ".js",
-                    ".ts",
-                    ".json",
-                    ".yaml",
-                    ".yml",
-                    ".sh",
-                    ".html",
-                    ".css",
-                    ".c",
-                    ".cpp",
-                    ".go",
-                    ".rs",
-                ]
-            ):
-                try:
-                    content = await read_file(file_path)
-                    if content and not content.startswith("Error:"):
-                        preview = content.strip()[:300]
-                        if len(content) > 300:
-                            preview += "..."
-                        lines.append(f"{indent}   └─ Preview: {preview}")
-                        files_read += 1
-                except Exception:
-                    pass
+                # Preview only text files (limited)
+                if files_read < max_files and any(
+                    f.lower().endswith(ext)
+                    for ext in [
+                        ".txt",
+                        ".md",
+                        ".py",
+                        ".js",
+                        ".ts",
+                        ".json",
+                        ".yaml",
+                        ".yml",
+                        ".sh",
+                        ".html",
+                        ".css",
+                    ]
+                ):
+                    try:
+                        content_result = await read_file(file_path)
 
-    return "\n".join(lines)
+                        if isinstance(content_result, str):
+                            if not content_result.startswith("Error:"):
+                                preview = content_result.strip()[:280]
+                                if len(content_result) > 280:
+                                    preview += "..."
+                                yield f"{indent}   └─ Preview: {preview}\n"
+                                files_read += 1
+                        elif hasattr(content_result, "__aiter__"):
+                            async for chunk in content_result:
+                                preview = chunk.strip()[:280]
+                                if len(chunk) > 280:
+                                    preview += "..."
+                                yield f"{indent}   └─ Preview: {preview}\n"
+                                files_read += 1
+                                break
+                    except Exception:
+                        pass
+
+    return stream_folder()
 
 
 @tool(
@@ -214,9 +314,7 @@ async def read_folder(
     require_confirmation=True,
 )
 async def apply_diff(file_path: str, diff_content: str) -> str:
-    """Apply patch using git apply --check first, then apply."""
     try:
-        # Safety check
         check = await asyncio.create_subprocess_exec(
             "git",
             "apply",
@@ -274,10 +372,8 @@ async def regex_replace(
     propagate=False,
     output_from="read_file",
     dependencies={
-        "search_files": {"name": "input"},  # sequence input → search_files.name
-        "read_file": {
-            "file_path": "search_files"
-        },  # first line of search → read_file.file_path
+        "search_files": {"name": "input"},
+        "read_file": {"file_path": "search_files"},
     },
     steps=["search_files", "read_file"],
 )
