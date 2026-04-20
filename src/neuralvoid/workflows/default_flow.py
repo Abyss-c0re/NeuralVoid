@@ -21,7 +21,7 @@ logger = Logger.get_logger()
 
 # ==================== CONDITIONS ====================
 @workflow.condition("goal_achieved")
-def goal_achieved(state: AgentState, args=None):
+def goal_achieved(state: AgentState, args=None) -> bool:
     if getattr(state, "mode", None) == "casual":
         return False
 
@@ -50,22 +50,40 @@ def goal_achieved(state: AgentState, args=None):
         or state.current_task_index >= len(state.planned_tasks) - 1
     )
 
-    # NEW: require either marker in some tool result or explicit_done when on last step
+    # ==================== NEW: Marker + Tool Success Logic (relocated here) ====================
+    marker = PromptBuilder.FINAL_ANSWER_MARKER
+    has_marker_in_reply = marker in full_reply
+
+    # Clean marker from final_reply if present (do this once, early)
+    if has_marker_in_reply:
+        state.full_reply = full_reply.replace(marker, "").strip()  # mutate safely
+
+    last_success = getattr(state, "last_tool_success", None)
+    tool_reported_success = bool(last_success and last_success.get("success"))
+
+    strong_completion = has_marker_in_reply or tool_reported_success
+
+    # Marker in any past tool result (kept for robustness)
     marker_in_history = any(
-        PromptBuilder.FINAL_ANSWER_MARKER in str(r.get("result", ""))
-        for r in state.tool_results
+        marker in str(r.get("result", "")) for r in state.tool_results
     )
 
+    # ==================== Final Decision ====================
     should_break = (
         is_complete
         and has_real_content
         and all_subtasks_done
-        and (explicit_done or marker_in_history)
+        and (explicit_done or marker_in_history or strong_completion)
     )
 
     if should_break:
         logger.info(
-            f"[GOAL ACHIEVED] Triggered | explicit={explicit_done} | marker_in_history={marker_in_history} | index={state.current_task_index}/{len(state.planned_tasks)}"
+            f"[GOAL ACHIEVED] Triggered | "
+            f"explicit={explicit_done} | "
+            f"marker_in_reply={has_marker_in_reply} | "
+            f"marker_in_history={marker_in_history} | "
+            f"strong_completion={strong_completion} | "
+            f"index={state.current_task_index}/{len(state.planned_tasks)}"
         )
 
     return should_break
