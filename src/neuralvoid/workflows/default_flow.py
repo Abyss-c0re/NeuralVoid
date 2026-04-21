@@ -143,19 +143,6 @@ async def goal_driven_loop(agent, state: AgentState):
 
     yield ("phase_changed", {"phase": "thinking"})
 
-    # ====================== ONE-TIME PLANNING ======================
-    if not state.planned_tasks:
-        agent.manager.unload_all()
-        is_multi_step = await is_multi_step_task(agent, state.task)
-        if is_multi_step:
-            logger.info("[MULTI-STEP] Detected → structured planning")
-            yield ("phase_changed", {"phase": "planning"})
-            async for ev, pl in ensure_subtasks_planned(agent, state):
-                yield ev, pl
-        else:
-            state.planned_tasks = [state.task]
-            state.task_expected_outcomes = ["Task completed successfully"]
-
     async for ev, pl in goal_driven_task_loop(agent, state, "goal_driven_loop"):
         yield ev, pl
 
@@ -210,6 +197,19 @@ async def chat_tool_loop(agent, state: AgentState):
     logger.info("[TASK-DRIVEN MODE] Delegating to goal_driven_loop")
     yield ("phase_changed", {"phase": "goal_driven"})
     state.reset_for_new_task(new_task=content)
+
+    # ====================== ONE-TIME PLANNING ======================
+    if not state.planned_tasks:
+        agent.manager.unload_all()
+        is_multi_step = await is_multi_step_task(agent, state.task)
+        if is_multi_step:
+            logger.info("[MULTI-STEP] Detected → structured planning")
+            yield ("phase_changed", {"phase": "planning"})
+            async for ev, pl in ensure_subtasks_planned(agent, state):
+                yield ev, pl
+        else:
+            state.planned_tasks = [state.task]
+            state.task_expected_outcomes = ["Task completed successfully"]
 
     # Forward inner loop events
     async for event, payload in agent.execute_loop(
