@@ -63,108 +63,42 @@ IGNORE_FILES = {".DS_Store", "Thumbs.db", ".gitignore"}
 # ─────────────────────────────────────────────────────────────
 
 
-async def _index_code_files(
-    agent, folder_path: str, recursive: bool = True, max_files: int = 200
-) -> dict:
-    """Internal helper: indexes code files into knowledge base."""
-    if not os.path.isdir(folder_path):
-        return {
-            "error": f"Folder '{folder_path}' not found.",
-            "indexed": 0,
-            "skipped": 0,
-        }
-
-    indexed = 0
-    skipped = 0
-
-    for root, dirs, files in os.walk(folder_path):
-        if not recursive:
-            dirs.clear()
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-
-        for f in files:
-            if f in IGNORE_FILES or not any(
-                f.lower().endswith(ext) for ext in CODE_EXTENSIONS
-            ):
-                skipped += 1
-                continue
-
-            if indexed >= max_files:
-                break
-
-            file_path = os.path.join(root, f)
-            try:
-                await agent.context_manager.index_file(agent, file_path)
-                indexed += 1
-            except Exception:
-                skipped += 1
-
-        if indexed >= max_files:
-            break
-
-    return {"indexed": indexed, "skipped": skipped}
-
-
-async def _read_codebase_content(
-    folder_path: str, recursive: bool = True, max_files: int = 100
+async def _collect_code_files(
+    folder_path: str, recursive: bool = True, max_files: int = 200
 ) -> List[str]:
-    """Internal helper: reads code files and builds output lines."""
+    """Pure helper: collects code file paths only (no reading, no agent)."""
     if not os.path.isdir(folder_path):
-        return [f"Error: Folder '{folder_path}' not found."]
+        return []
 
-    lines = [f"📂 Codebase: {os.path.abspath(folder_path)}"]
-    files_read = 0
+    files_to_read: List[str] = []
+    files_count = 0
 
     for root, dirs, files in os.walk(folder_path):
         if not recursive:
             dirs.clear()
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-
-        rel = os.path.relpath(root, folder_path)
-        indent = "  " * (rel.count(os.sep) + 1) if rel != "." else ""
 
         for f in sorted(files):
             if f in IGNORE_FILES or not any(
                 f.lower().endswith(ext) for ext in CODE_EXTENSIONS
             ):
                 continue
-            if files_read >= max_files:
+
+            if files_count >= max_files:
                 break
 
             file_path = os.path.join(root, f)
-            lines.append(f"{indent}📄 {file_path}")
+            files_to_read.append(file_path)
+            files_count += 1
 
-            try:
-                # Reuse the universal read_file for consistency + streaming support
-                content_result = await _read_file(
-                    None, file_path
-                )  # agent=None since we only want raw text
-
-                if isinstance(content_result, str):
-                    preview = content_result[:400].strip()
-                    if len(content_result) > 400:
-                        preview += "..."
-                    lines.append(f"{indent}   └─ {preview}")
-                else:
-                    # It's a streaming generator → consume first chunk only for preview
-                    async for chunk in content_result:
-                        preview = chunk[:400].strip()
-                        if len(chunk) > 400:
-                            preview += "..."
-                        lines.append(f"{indent}   └─ {preview}")
-                        break
-                files_read += 1
-            except Exception:
-                lines.append(f"{indent}   └─ (error reading file)")
-
-        if files_read >= max_files:
+        if files_count >= max_files:
             break
 
-    return lines
+    return files_to_read
 
 
 # ─────────────────────────────────────────────────────────────
-# PUBLIC TOOLS (only these are decorated)
+# PUBLIC TOOLS (agent as first arg ONLY when using execute_direct)
 # ─────────────────────────────────────────────────────────────
 
 
@@ -172,27 +106,78 @@ async def _read_codebase_content(
     "CodingTools",
     tags=["code", "index", "codebase", "kb"],
     name="index_codebase",
-    description="Index all code files in a folder into the knowledge base.",
+    description="Index all code files in a folder into the knowledge base (via read_file).",
 )
 async def index_codebase(
     agent, folder_path: str, recursive: bool = True, max_files: int = 200
 ) -> str:
-    result = await _index_code_files(agent, folder_path, recursive, max_files)
-    if "error" in result:
-        return result["error"]
-    return f"✅ Indexed {result['indexed']} code files from '{folder_path}' (skipped {result['skipped']})"
+    """Index code files using read_file via execute_direct."""
+    files = await _collect_code_files(folder_path, recursive, max_files)
+
+    if not files:
+        return f"✅ Indexed 0 code files from '{folder_path}' (skipped 0)"
+
+    indexed = 0
+    skipped = 0
+
+    for file_path in files:
+        try:
+            await agent.manager.execute_direct(
+                "read_file",
+                file_path=file_path,
+            )
+            indexed += 1
+        except Exception:
+            skipped += 1
+
+    return f"✅ Indexed {indexed} code files from '{folder_path}' (skipped {skipped})"
 
 
 @tool(
     "CodingTools",
     tags=["code", "read", "codebase"],
     name="read_codebase",
-    description="Read and return content of all code files in a folder (reuses universal read_file).",
+    description="Read and return content of all code files in a folder (uses read_file via execute_direct).",
 )
 async def read_codebase(
-    folder_path: str, recursive: bool = True, max_files: int = 100
+    agent, folder_path: str, recursive: bool = True, max_files: int = 100
 ) -> str:
-    lines = await _read_codebase_content(folder_path, recursive, max_files)
+    """Read codebase with previews — uses read_file via execute_direct."""
+    files = await _collect_code_files(folder_path, recursive, max_files)
+
+    if not files:
+        return f"Error: Folder '{folder_path}' not found."
+
+    lines = [f"📂 Codebase: {os.path.abspath(folder_path)}"]
+
+    for file_path in files:
+        rel = os.path.relpath(file_path, folder_path)
+        indent = "  " * (rel.count(os.sep) + 1) if rel != "." else ""
+
+        lines.append(f"{indent}📄 {file_path}")
+
+        try:
+            content_result = await agent.manager.execute_direct(
+                "read_file",
+                file_path=file_path,
+            )
+
+            if isinstance(content_result, str):
+                preview = content_result[:400].strip()
+                if len(content_result) > 400:
+                    preview += "..."
+                lines.append(f"{indent}   └─ {preview}")
+            else:
+                # Streaming generator → first chunk only for preview
+                async for chunk in content_result:
+                    preview = chunk[:400].strip()
+                    if len(chunk) > 400:
+                        preview += "..."
+                    lines.append(f"{indent}   └─ {preview}")
+                    break
+        except Exception:
+            lines.append(f"{indent}   └─ (error reading file)")
+
     return "\n".join(lines)
 
 
@@ -203,58 +188,37 @@ async def read_codebase(
     description="List all code files in a folder or project.",
 )
 async def list_code_files(folder_path: str = ".", recursive: bool = True) -> str:
-    if not os.path.isdir(folder_path):
-        return f"Error: Folder '{folder_path}' not found."
-
-    results = []
-    for root, dirs, files in os.walk(folder_path):
-        if not recursive:
-            dirs.clear()
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-
-        for f in files:
-            if (
-                any(f.lower().endswith(ext) for ext in CODE_EXTENSIONS)
-                and f not in IGNORE_FILES
-            ):
-                results.append(os.path.join(root, f))
-
-    return "\n".join(sorted(results)) if results else "(no code files found)"
+    """Pure listing — no agent needed."""
+    files = await _collect_code_files(folder_path, recursive, max_files=1000)
+    return "\n".join(sorted(files)) if files else "(no code files found)"
 
 
 @tool(
     "CodingTools",
     tags=["code", "search", "codebase"],
     name="search_code",
-    description="Search for text inside all code files.",
+    description="Search for text inside all code files (via read_file).",
 )
 async def search_code(
-    pattern: str, folder_path: str = ".", recursive: bool = True
+    agent, pattern: str, folder_path: str = ".", recursive: bool = True
 ) -> str:
-    if not os.path.isdir(folder_path):
-        return f"Error: Folder '{folder_path}' not found."
-
+    """Search code files using read_file via execute_direct."""
+    files = await _collect_code_files(folder_path, recursive, max_files=500)
     results = []
-    for root, dirs, files in os.walk(folder_path):
-        if not recursive:
-            dirs.clear()
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
 
-        for f in files:
-            if (
-                any(f.lower().endswith(ext) for ext in CODE_EXTENSIONS)
-                and f not in IGNORE_FILES
-            ):
-                file_path = os.path.join(root, f)
-                try:
-                    # Reuse read_file for consistency
-                    content = await _read_file(None, file_path)
-                    if isinstance(content, str):
-                        for i, line in enumerate(content.splitlines(), 1):
-                            if pattern.lower() in line.lower():
-                                results.append(f"{file_path}:{i}: {line.strip()}")
-                except Exception:
-                    continue
+    for file_path in files:
+        try:
+            content = await agent.manager.execute_direct(
+                "read_file",
+                file_path=file_path,
+            )
+            if isinstance(content, str):
+                for i, line in enumerate(content.splitlines(), 1):
+                    if pattern.lower() in line.lower():
+                        results.append(f"{file_path}:{i}: {line.strip()}")
+        except Exception:
+            continue
+
     return "\n".join(results) if results else "(no matches)"
 
 
@@ -265,10 +229,12 @@ async def search_code(
     description="Show clean project folder tree with only code files.",
 )
 async def get_project_structure(folder_path: str = ".", max_depth: int = 3) -> str:
+    """Pure structure tree — no agent needed."""
     if not os.path.isdir(folder_path):
         return f"Error: Folder '{folder_path}' not found."
 
     lines = [f"📂 {os.path.basename(os.path.abspath(folder_path))}"]
+
     for root, dirs, files in os.walk(folder_path):
         depth = root.count(os.sep) - os.path.abspath(folder_path).count(os.sep)
         if depth > max_depth:
@@ -283,6 +249,7 @@ async def get_project_structure(folder_path: str = ".", max_depth: int = 3) -> s
                 and f not in IGNORE_FILES
             ):
                 lines.append(f"{indent}📄 {f}")
+
     return "\n".join(lines)
 
 

@@ -2,7 +2,7 @@ import os
 import asyncio
 import aiofiles
 
-from typing import AsyncIterable
+from typing import AsyncIterable, List
 from neuralcore.actions.registry import tool, sequenced
 
 from neuralvoid.utils.file_helpers import _read_file
@@ -14,6 +14,19 @@ logger = Logger.get_logger()
 # ─────────────────────────────────────────────────────────────
 # File Editing Tools – Optimized for Streaming + Batching
 # ─────────────────────────────────────────────────────────────
+
+IGNORE_DIRS = {
+    ".git",
+    "node_modules",
+    "venv",
+    "env",
+    "__pycache__",
+    "build",
+    "dist",
+    ".venv",
+    ".idea",
+    ".vscode",
+}
 
 
 @tool(
@@ -79,74 +92,138 @@ async def read_file(
 
 @tool(
     "FileEditingTools",
+    tags=["file", "read", "batch"],
+    name="read_multiple_files",
+    description="Read multiple files at once using the universal read_file. "
+    "Optionally triggers summarization/indexing of the results.",
+)
+async def read_multiple_files(
+    agent,
+    files: List[str],
+    summary: bool = False,
+) -> str:
+    """Reads multiple files via the universal read_file tool.
+    If summary=True, it triggers SearchToolResults to create a consolidated summary."""
+    if not files:
+        return "No files provided."
+
+    indexed_files = []
+    errors = []
+
+    for file_path in files:
+        try:
+            # Use execute_direct to leverage the full universal read_file (streaming + dispatch)
+            await agent.manager.execute_direct(
+                "read_file",
+                file_path=file_path,
+            )
+
+            file_name = os.path.basename(file_path)
+            indexed_files.append(file_name)
+
+        except Exception as e:
+            errors.append(f"{os.path.basename(file_path)}: {str(e)}")
+
+    # Final response
+    if summary and indexed_files:
+        try:
+            # Trigger summarization over the just-read files
+            summary_result = await agent.manager.execute_direct(
+                "SearchToolResults",  # assuming this tool exists in your registry
+                query=" ".join(indexed_files),  # or better query if you have one
+            )
+            return (
+                f"✅ Read and summarized {len(indexed_files)} files:\n{summary_result}"
+            )
+        except Exception as e:
+            logger.warning(f"Summary failed after reading files: {e}")
+
+    if errors:
+        error_msg = f" ({len(errors)} errors)" if errors else ""
+        return f"✅ Indexed {len(indexed_files)} files{error_msg}: " + ", ".join(
+            indexed_files
+        )
+
+    return "✅ Files indexed: " + ", ".join(indexed_files)
+
+
+@tool(
+    "FileEditingTools",
     tags=["file", "folder", "read"],
     name="read_folder",
-    description="Recursively read folder structure and content of text files.",
+    description="Recursively read all text/code files in a folder using read_multiple_files. "
+    "Returns a simple confirmation that the folder content was indexed.",
 )
 async def read_folder(
-    folder_path: str, recursive: bool = True, max_files: int = 30
-) -> str | AsyncIterable[str]:
-    """Optimized streaming folder output."""
+    agent,
+    folder_path: str,
+    recursive: bool = True,
+    max_files: int = 50,  # reasonable default to prevent explosion
+) -> str:
+    """Collects all readable files in the folder and delegates to read_multiple_files."""
     if not os.path.isdir(folder_path):
         return f"Error: Folder '{folder_path}' not found."
 
-    async def stream_folder():
-        yield f"📂 Folder: {os.path.abspath(folder_path)}\n"
-        files_read = 0
+    files_to_read: List[str] = []
+    files_read = 0
 
-        for root, dirs, files in os.walk(folder_path):
-            if not recursive:
-                dirs.clear()
+    for root, dirs, files in os.walk(folder_path):
+        if not recursive:
+            dirs.clear()
 
-            rel_path = os.path.relpath(root, folder_path)
-            indent = "  " * (rel_path.count(os.sep) + 1) if rel_path != "." else "  "
+        # Skip ignored directories
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
 
-            if rel_path != ".":
-                yield f"{indent}📁 {os.path.basename(root)}/\n"
+        for f in sorted(files):
+            file_path = os.path.join(root, f)
 
-            for f in sorted(files):
-                file_path = os.path.join(root, f)
-                yield f"{indent}📄 {f}\n"
+            # Only read text/code-like files (you can expand this list)
+            if any(
+                f.lower().endswith(ext)
+                for ext in [
+                    ".txt",
+                    ".md",
+                    ".py",
+                    ".js",
+                    ".ts",
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".sh",
+                    ".html",
+                    ".css",
+                    ".rst",
+                    ".toml",
+                    ".ini",
+                    ".cfg",
+                ]
+            ):
+                if files_read >= max_files:
+                    break
+                files_to_read.append(file_path)
+                files_read += 1
 
-                # Preview only text files (limited)
-                if files_read < max_files and any(
-                    f.lower().endswith(ext)
-                    for ext in [
-                        ".txt",
-                        ".md",
-                        ".py",
-                        ".js",
-                        ".ts",
-                        ".json",
-                        ".yaml",
-                        ".yml",
-                        ".sh",
-                        ".html",
-                        ".css",
-                    ]
-                ):
-                    try:
-                        content_result = await read_file(file_path)
+        if files_read >= max_files:
+            break
 
-                        if isinstance(content_result, str):
-                            if not content_result.startswith("Error:"):
-                                preview = content_result.strip()[:280]
-                                if len(content_result) > 280:
-                                    preview += "..."
-                                yield f"{indent}   └─ Preview: {preview}\n"
-                                files_read += 1
-                        elif hasattr(content_result, "__aiter__"):
-                            async for chunk in content_result:
-                                preview = chunk.strip()[:280]
-                                if len(chunk) > 280:
-                                    preview += "..."
-                                yield f"{indent}   └─ Preview: {preview}\n"
-                                files_read += 1
-                                break
-                    except Exception:
-                        pass
+    if not files_to_read:
+        return (
+            f"Folder '{os.path.basename(folder_path)}' contains no readable text files."
+        )
 
-    return stream_folder()
+    # Delegate to the new batch reader
+    folder_name = os.path.basename(folder_path) or "root"
+    try:
+        await agent.manager.execute_direct(
+            "read_multiple_files",
+            files=files_to_read,
+            summary=False,
+        )
+        return f"✅ Content of folder '{folder_name}' was indexed ({len(files_to_read)} files)."
+
+    except Exception as e:
+        logger.error(f"read_folder failed for '{folder_path}': {e}", exc_info=True)
+        return f"Error processing folder '{folder_name}': {str(e)}"
 
 
 @tool(
