@@ -2,8 +2,6 @@ import os
 import asyncio
 from typing import List
 from neuralcore.actions.registry import tool
-from neuralvoid.utils.file_helpers import _read_file
-
 
 # ─────────────────────────────────────────────────────────────
 # COMMON CODE EXTENSIONS + IGNORE PATTERNS (lightweight, pure Python)
