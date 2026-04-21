@@ -5,7 +5,7 @@ import aiofiles
 from typing import AsyncIterable, List
 from neuralcore.actions.registry import tool, sequenced
 
-from neuralvoid.utils.file_helpers import _read_file
+from neuralcore.utils.file_helpers import _read_file
 
 from neuralcore.utils.logger import Logger
 
