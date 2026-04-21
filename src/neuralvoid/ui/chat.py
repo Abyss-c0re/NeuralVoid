@@ -3,9 +3,11 @@ import time
 from typing import Optional, Any
 
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Markdown
+from textual.widgets import TextArea, Markdown
 from textual.containers import VerticalScroll
 from textual.binding import Binding
+from textual.message import Message as TextualMessage
+from textual.events import Key
 
 from neuralcore.agents.core import Agent
 from neuralcore.actions.registry import registry
@@ -24,7 +26,7 @@ logger = Logger.get_logger()
 # ============================================================
 
 
-class Message(Markdown):
+class ChatMessage(Markdown):
     """Markdown-rendered chat message with optional status footer."""
 
     def __init__(self, role: str, content: str = ""):
@@ -114,6 +116,30 @@ class ChatView(VerticalScroll):
 
 
 # ============================================================
+# Multiline Chat Input
+# ============================================================
+
+
+class ChatInput(TextArea):
+    class Submitted(TextualMessage):
+        def __init__(self, text_area: "ChatInput") -> None:
+            super().__init__()
+            self.text_area = text_area
+            self.value = text_area.text
+
+    async def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            self.post_message(self.Submitted(self))
+            return
+
+        if event.key in ("ctrl+n",):
+            event.stop()
+            self.insert("\n")
+            return
+        
+
+# ============================================================
 # Main App
 # ============================================================
 
@@ -125,7 +151,7 @@ class LLMChatApp(App):
     pending_confirmation: Optional[dict] = None
 
     _agent_task: asyncio.Task | None = None
-    _current_assistant_msg: Optional[Message] = None
+    _current_assistant_msg: Optional[ChatMessage] = None
 
     _current_pure_text: str = ""
     _current_tool_buffer: str = ""
@@ -151,8 +177,11 @@ class LLMChatApp(App):
         padding: 1;
     }
 
-    Input {
+    TextArea {
         dock: bottom;
+        height: 4;
+        border: tall $primary;
+        padding: 0 1;
     }
     """
 
@@ -189,24 +218,31 @@ class LLMChatApp(App):
     def compose(self) -> ComposeResult:
         self.chat = ChatView(id="chat")
         yield self.chat
-        yield Input(placeholder="Ask something...")
+        yield ChatInput(id="input")
 
     async def on_mount(self):
-        set_renderer_app(self, Message)
+        set_renderer_app(self, ChatMessage)
         await self.rendering.start_worker()
 
         self.chat.add(
-            Message(
+            ChatMessage(
                 "assistant",
                 f"Connected to **{self.client.model}**\n\n"
-                "Type a message and press **Enter**.\n"
+                "Type a message and press **Enter** to send.\n"
+                "Use **Ctrl+n** for a new line.\n"
                 "Commands: **stop** / **cancel** → stop current stream\n"
                 "**exit** → close app",
             )
         )
 
         self._agent_task = asyncio.create_task(self.run_chat_loop(), name="chat-loop")
-        self.query_one(Input).focus()
+        self.query_one("#input").focus()
+
+    async def on_key(self, event: Key) -> None:
+        if event.key == "escape":
+            await self.action_stop_stream()
+            event.stop()
+
 
     # ====================== Persistent Agent Loop ======================
 
@@ -219,7 +255,7 @@ class LLMChatApp(App):
                 max_tokens=self.max_tokens,
                 chat_mode=True,
             ):
-                #logger.debug(f"[UI] Event: {event_type}")
+                # logger.debug(f"[UI] Event: {event_type}")
 
                 if event_type in (
                     "content_delta",
@@ -227,7 +263,7 @@ class LLMChatApp(App):
                     "step_completed",
                     "final_summary",
                 ) and (self._current_assistant_msg is None or self._last_finished):
-                    assistant_msg = Message("assistant", "")
+                    assistant_msg = ChatMessage("assistant", "")
                     self.chat.add(assistant_msg)
                     self._current_assistant_msg = assistant_msg
                     self._current_pure_text = ""
@@ -249,11 +285,11 @@ class LLMChatApp(App):
             logger.debug("Chat loop cancelled")
         except Exception as e:
             logger.exception("Chat loop crashed")
-            self.chat.add(Message("system", f"❌ Runner error: {e}"))
+            self.chat.add(ChatMessage("system", f"❌ Runner error: {e}"))
 
     # ====================== UI Update ======================
 
-    async def _ui_update(self, message: Message, immediate: bool = False) -> None:
+    async def _ui_update(self, message: ChatMessage, immediate: bool = False) -> None:
         now = time.time()
         if not immediate and now - self._last_stream_update < self.UPDATE_INTERVAL:
             return
@@ -271,7 +307,7 @@ class LLMChatApp(App):
     # ====================== Process Agent Events ======================
 
     async def _process_agent_event(
-        self, event_type: str, payload: Any, message: Message
+        self, event_type: str, payload: Any, message: ChatMessage
     ) -> None:
         level = self.tool_info_level or "compact"
 
@@ -303,7 +339,7 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        elif event_type == "tool_name":           # ← ADD THIS BLOCK
+        elif event_type == "tool_name":  # ← ADD THIS BLOCK
             name = payload.get("name", "unknown")
             message.update_status(
                 f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
@@ -343,7 +379,6 @@ class LLMChatApp(App):
                 self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
-
         elif event_type == "needs_confirmation":
             tool_name = payload.get("name", "unknown")
             md = _build_tool_markdown(
@@ -360,7 +395,6 @@ class LLMChatApp(App):
             self.pending_confirmation = {**payload, "assistant_msg": message}
             self.waiting_for_confirmation = True
             return
-
 
         elif event_type == "final_summary":
             self._current_pure_text += f"\n\n{payload}\n"
@@ -463,9 +497,9 @@ class LLMChatApp(App):
 
     # ====================== User Input ======================
 
-    async def on_input_submitted(self, event: Input.Submitted):
+    async def on_chat_input_submitted(self, event: ChatInput.Submitted):
         value = event.value.strip()
-        event.input.value = ""
+        event.text_area.clear()
         if not value:
             return
 
@@ -475,7 +509,7 @@ class LLMChatApp(App):
             return
 
         if cmd == "exit":
-            self.chat.add(Message("system", "👋 Exiting..."))
+            self.chat.add(ChatMessage("system", "👋 Exiting..."))
             await asyncio.sleep(0.3)
             self.exit()
             return
@@ -483,10 +517,10 @@ class LLMChatApp(App):
         if await self._handle_confirmation_response(value):
             return
 
-        self.chat.add(Message("user", value))
+        self.chat.add(ChatMessage("user", value))
         self.conversation.append({"role": "user", "content": value})
 
-        assistant_msg = Message("assistant", "")
+        assistant_msg = ChatMessage("assistant", "")
         self.chat.add(assistant_msg)
 
         self._current_assistant_msg = assistant_msg
