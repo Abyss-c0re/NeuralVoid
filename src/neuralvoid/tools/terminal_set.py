@@ -15,18 +15,31 @@ import shutil
     "TerminalTools",
     tags=["filesystem", "list", "navigation"],
     name="list_directory",
-    description="List files and folders in a directory.",
+    description="List files and folders in a directory. "
+    "Pass '.' (or omit the argument) to list the current working directory. "
+    "Supports both relative and absolute paths.",
 )
 async def list_directory(path: str = ".") -> str:
-    """List files in directory."""
+    """List files and folders. Uses robust pathlib resolution + clear error messages."""
     try:
-        items = os.listdir(path)
-        result = []
-        for item in sorted(items):
-            full_path = os.path.join(path, item)
-            prefix = "📁 " if os.path.isdir(full_path) else "📄 "
-            result.append(f"{prefix}{item}")
-        return "\n".join(result) if result else "Directory empty."
+        # Robust path handling (handles ~, relative paths, symlinks, etc.)
+        target = Path(path).expanduser().resolve(strict=False)
+
+        if not target.exists():
+            return f"❌ Path does not exist: {path} (resolved to {target})"
+
+        if not target.is_dir():
+            return f"❌ Not a directory: {path} (resolved to {target})"
+
+        items = []
+        for item in sorted(target.iterdir()):
+            prefix = "📁 " if item.is_dir() else "📄 "
+            items.append(f"{prefix}{item.name}")
+
+        return "\n".join(items) if items else "Directory empty."
+
+    except PermissionError:
+        return f"❌ Permission denied: {path}"
     except Exception as e:
         return f"list_directory error: {str(e)}"
 
