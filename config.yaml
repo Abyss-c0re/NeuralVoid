@@ -187,6 +187,7 @@ app:
   tool_info_level: compact
   models_dir: ~/.neuralcore/models
   cognition:
+    reranker_enabled: true
     novelty_threshold: 0.82
   knowledge_base:
     enabled: true
