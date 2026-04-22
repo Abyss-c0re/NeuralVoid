@@ -171,14 +171,17 @@ async def chat_tool_loop(agent, state: AgentState):
 
         casual_messages = await agent.context_manager.provide_context(
             query=content,
-            max_input_tokens=agent.max_tokens,
-            reserved_for_output=12000,
+            max_input_tokens=agent.max_tokens * 0.65,
+            reserved_for_output=agent.client.max_tokens * 0.35,
             include_logs=True,
             chat=True,
         )
 
         final_reply = await agent.client.chat(
-            casual_messages, temperature=0.85, top_p=0.95
+            casual_messages,
+            temperature=0.85,
+            top_p=0.95,
+            max_tokens=agent.client.max_tokens * 0.4,
         )
 
         await agent.add_message("assistant", final_reply)
@@ -224,10 +227,12 @@ async def chat_tool_loop(agent, state: AgentState):
 
         results = await agent.context_manager.provide_context(
             query=content,
-            lightweight_agentic = True,
+            lightweight_agentic=True,
+            max_input_tokens=agent.client.max_tokens * 0.65,
+            reserved_for_output=agent.client.max_tokens * 0.4,
         )
         final_reply = await agent.client.chat(
-            results, temperature=0.0, top_p=0.1
+            results, temperature=0.0, top_p=0.1, max_tokens=agent.client.max_tokens
         )
         await agent.add_message("assistant", final_reply)
         yield (
