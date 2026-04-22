@@ -188,3 +188,8 @@ app:
   models_dir: ~/.neuralcore/models
   cognition:
     novelty_threshold: 0.82
+  knowledge_base:
+    enabled: true
+    base_folder: "~/.neuralcore/kb"     # Root folder for all indexed data
+    auto_reindex: true                  # Automatically watch for file changes
+    reindex_interval_seconds: 300
