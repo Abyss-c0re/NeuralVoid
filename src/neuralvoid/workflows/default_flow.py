@@ -5,15 +5,15 @@ from enum import Enum
 
 from neuralcore.agents.state import AgentState
 
+
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.workflows.executors import (
-    ensure_subtasks_planned,
+    plan_tasks_unified,
     goal_driven_task_loop,
     classify_intent,
-    is_multi_step_task,
 )
 
 logger = Logger.get_logger()
@@ -173,8 +173,7 @@ async def chat_tool_loop(agent, state: AgentState):
             query=content,
             max_input_tokens=agent.max_tokens,
             reserved_for_output=12000,
-            system_prompt=PromptBuilder.casual_system_prompt(),
-            include_logs=False,
+            include_logs=True,
             chat=True,
         )
 
@@ -200,16 +199,8 @@ async def chat_tool_loop(agent, state: AgentState):
 
     # ====================== ONE-TIME PLANNING ======================
     if not state.planned_tasks:
-        agent.manager.unload_all()
-        is_multi_step = await is_multi_step_task(agent, state.task)
-        if is_multi_step:
-            logger.info("[MULTI-STEP] Detected → structured planning")
-            yield ("phase_changed", {"phase": "planning"})
-            async for ev, pl in ensure_subtasks_planned(agent, state):
-                yield ev, pl
-        else:
-            state.planned_tasks = [state.task]
-            state.task_expected_outcomes = ["Task completed successfully"]
+        async for event, payload in plan_tasks_unified(agent, state):
+            yield event, payload
 
     # Forward inner loop events
     async for event, payload in agent.execute_loop(
@@ -227,7 +218,33 @@ async def chat_tool_loop(agent, state: AgentState):
         "[TASK-DRIVEN MODE] Inner goal_driven_loop completed — back to outer chat"
     )
 
-    # After inner task finishes → restart outer chat loop
+    # ====================== FINAL SYNTHESIS (fallback only) ======================
+    if state.goal_reached:
+        yield ("phase_changed", {"phase": "generating_final_answer"})
+
+        results = await agent.context_manager.provide_context(
+            query=content,
+            lightweight_agentic = True,
+        )
+        final_reply = await agent.client.chat(
+            results, temperature=0.0, top_p=0.1
+        )
+        await agent.add_message("assistant", final_reply)
+        yield (
+            "llm_response",
+            {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+        )
+        logger.info("Task completed successfully → full reset")
+        state.reset_for_new_task()
+    else:
+        logger.warning("Loop ended without explicit goal or restart – forcing restart")
+        state.request_loop_restart(reason="Fallback restart", target_loop=target_loop)
+        yield ("phase_changed", {"phase": "restarting_loop"})
+
+    if not state.goal_reached:
+        state.status = "idle"
+        state.is_complete = True
+    # Restart outer loop for next user input
     state.request_loop_restart(
         reason="Inner goal_driven_loop finished, returning to chat",
         target_loop=target_loop,
