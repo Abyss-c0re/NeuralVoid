@@ -238,6 +238,11 @@ class LLMChatApp(App):
         self._agent_task = asyncio.create_task(self.run_chat_loop(), name="chat-loop")
         self.query_one("#input").focus()
 
+    async def on_unmount(self):
+        logger.info("Shutting down logger")
+
+        await Logger.shutdown()
+
     async def on_key(self, event: Key) -> None:
         if event.key == "escape":
             await self.action_stop_stream()
