@@ -9,27 +9,54 @@ logger = Logger.get_logger()
 
 @tool(
     "ResearchTools",
-    name="SearchToolResults",
-    description="Search and retrieve the most relevant content from previous tool outcomes and executed commands (including file contents, analysis results, logs, and other tool-generated data). Use this when you need to research what has already been discovered or processed by tools.",
-    tags=["context", "research", "investigate", "tool_results", "memory"],
+    name="GetContext",
+    description=(
+        "PRIMARY TOOL for searching the KnowledgeBase. "
+        "Use this FIRST whenever the task requires: "
+        "- Retrieving relevant content from indexed documents, PDFs, or previous tool outcomes "
+        "- Researching what has already been discovered or processed "
+        "- Gathering context for analysis or report writing. "
+        "This is the main research/retrieval tool. Always prefer this over generic file reading when the query involves 'knowledge base', 'indexed documents', 'neuroscience', 'analysis', or 'research'."
+    ),
+    tags=[
+        "context",
+        "investigate",
+        "tool_results",
+        "memory",
+        "knowledgebase",
+    ],
+    record_to_context=False
 )
 async def provide_context(agent, query: str):
-    return await agent.context_manager.provide_context(
+    results = await agent.context_manager.provide_context(
         query=query,
         research_mode=True,
         return_as_string=True,
-        lightweight_agentic=True,
     )
+    return results
 
 
 @tool(
     "ResearchTools",
     name="PerformAnalysis",
-    description="Perform deep analysis on accumulated knowledge from tool outcomes. "
-    "Provide a clear analysis query (e.g. 'analyze the payment processor integration issues and findings'). "
-    "This tool will generate multiple targeted searches, retrieve relevant tool results, "
-    "and synthesize a comprehensive structured report.",
-    tags=["context", "research", "investigate", "analysis", "report", "tool_results"],
+    description=(
+        "PRIMARY TOOL for deep analysis and report synthesis. "
+        "Use this when the task requires: "
+        "- Performing structured analysis on accumulated knowledge "
+        "- Generating comprehensive reports with Theoretical Basis, Validation, Gap Analysis, and Recommendations "
+        "- Synthesizing insights from multiple sources in the knowledgebase. "
+        "This tool automatically generates multiple targeted searches and produces a professional structured report. "
+        "Call this directly for any 'analyze', 'compare', 'theoretical alignment', or 'report' task."
+    ),
+    tags=[
+        "context",
+        "research",
+        "investigate",
+        "analysis",
+        "report",
+        "knowledgebase",
+        "tool_results",
+    ],
 )
 async def perform_analysis(agent, query: str):
     if not query or not query.strip():
@@ -66,13 +93,13 @@ async def perform_analysis(agent, query: str):
 
     logger.info(f"Generated {len(queries)} sub-queries for analysis")
 
-    # Step 2: Accumulate results from SearchToolResults for each generated query
+    # Step 2: Accumulate results from GetContext for each generated query
     all_research = []
     for sub_query in queries:
-        logger.debug(f"Executing SearchToolResults for sub-query: {sub_query[:80]}...")
+        logger.debug(f"Executing GetContext for sub-query: {sub_query[:80]}...")
         try:
             result = await agent.manager.execute_direct(
-                "SearchToolResults",
+                "GetContext",
                 query=sub_query,
             )
             if result and str(result).strip():
@@ -81,9 +108,7 @@ async def perform_analysis(agent, query: str):
             else:
                 logger.debug(f"No results returned for sub-query: {sub_query[:50]}...")
         except Exception as e:
-            logger.error(
-                f"Failed to execute SearchToolResults for '{sub_query[:50]}...': {e}"
-            )
+            logger.error(f"Failed to execute GetContext for '{sub_query[:50]}...': {e}")
             all_research.append(
                 f"--- Search for: {sub_query} ---\n[Error retrieving: {e}]\n"
             )
@@ -107,10 +132,11 @@ async def perform_analysis(agent, query: str):
 @tool(
     "ResearchTools",
     name="ResearchWeb",
-    description="Perform deep web research on a topic: search the web, index relevant pages into the knowledge base, "
-    "then analyze everything using accumulated tool outcomes (including new web content). "
-    "Returns a comprehensive structured analysis report. "
-    "Best used when you need up-to-date external knowledge combined with previous tool findings.",
+    description=(
+        "Use for external web research when the task requires up-to-date information not present in the local knowledgebase. "
+        "Automatically searches the web, indexes results, and then performs deep analysis using PerformAnalysis. "
+        "Only use when the query explicitly needs current external knowledge (e.g. latest papers, documentation, or real-time data)."
+    ),
     tags=["web", "research", "investigate", "analysis", "report"],
 )
 async def research_web(agent, query: str, max_results: int = 5):

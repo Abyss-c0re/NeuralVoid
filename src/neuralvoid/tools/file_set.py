@@ -103,7 +103,7 @@ async def read_multiple_files(
     summary: bool = False,
 ) -> str:
     """Reads multiple files via the universal read_file tool.
-    If summary=True, it triggers SearchToolResults to create a consolidated summary."""
+    If summary=True, it triggers GetContext to create a consolidated summary."""
     if not files:
         return "No files provided."
 
@@ -129,7 +129,7 @@ async def read_multiple_files(
         try:
             # Trigger summarization over the just-read files
             summary_result = await agent.manager.execute_direct(
-                "SearchToolResults",  # assuming this tool exists in your registry
+                "GetContext",  # assuming this tool exists in your registry
                 query=" ".join(indexed_files),  # or better query if you have one
             )
             return (
