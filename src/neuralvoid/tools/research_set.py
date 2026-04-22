@@ -1,5 +1,6 @@
 import json
 import asyncio
+from typing import Optional
 from neuralcore.actions.registry import tool
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
@@ -25,53 +26,64 @@ logger = Logger.get_logger()
         "memory",
         "knowledgebase",
     ],
-    record_to_context=False
+    record_to_context=False,
 )
 async def provide_context(agent, query: str):
     results = await agent.context_manager.provide_context(
         query=query,
         research_mode=True,
         return_as_string=True,
+        max_input_tokens=agent.max_tokens * 0.65,
+        reserved_for_output=agent.client.max_tokens * 0.35,
     )
     return results
 
 
 @tool(
     "ResearchTools",
-    name="PerformAnalysis",
+    name="ConductResearch",
     description=(
-        "PRIMARY TOOL for deep analysis and report synthesis. "
-        "Use this when the task requires: "
-        "- Performing structured analysis on accumulated knowledge "
-        "- Generating comprehensive reports with Theoretical Basis, Validation, Gap Analysis, and Recommendations "
-        "- Synthesizing insights from multiple sources in the knowledgebase. "
-        "This tool automatically generates multiple targeted searches and produces a professional structured report. "
-        "Call this directly for any 'analyze', 'compare', 'theoretical alignment', or 'report' task."
+        "PRIMARY RESEARCH TOOL for deep analysis and professional report generation. "
+        "Expands the topic into multiple targeted sub-queries, retrieves a rich context chunk from the local knowledgebase "
+        "(GetContext when local=True) and/or the web (search_web + indexing when web=True), then synthesizes a structured report via LLM. "
+        "If you provide a file_output path, the tool will automatically save the final report to that file using the write_file tool "
+        "and append a confirmation note to the returned text. "
+        "Use this for any 'analyze', 'research', 'compare', 'theoretical alignment', or 'generate report' task. "
+        "Set local=True (default) for knowledgebase-only, web=True for up-to-date external information, or both=True for hybrid research."
     ),
     tags=[
-        "context",
         "research",
-        "investigate",
         "analysis",
         "report",
         "knowledgebase",
-        "tool_results",
+        "web",
+        "context",
+        "investigate",
     ],
 )
-async def perform_analysis(agent, query: str):
-    if not query or not query.strip():
-        logger.warning("PerformAnalysis called with empty query")
-        return "Error: Analysis query cannot be empty."
+async def conduct_research(
+    agent,
+    topic: str,
+    local: bool = True,
+    web: bool = False,
+    file_output: Optional[str] = None,
+):
+    """Unified research conductor: local KB + optional web search → multi-query retrieval → LLM synthesis → optional file write."""
+    if not topic or not topic.strip():
+        logger.warning("ConductResearch called with empty topic")
+        return "Error: topic cannot be empty."
 
-    logger.info(f"PerformAnalysis started | query='{query[:100]}...'")
+    logger.info(
+        f"ConductResearch started | topic='{topic[:100]}...' | local={local} | web={web} | file_output={file_output}"
+    )
 
-    # Step 1: Use PromptBuilder to generate multiple diverse search queries
+    # Step 1: Generate multiple diverse sub-queries from the main topic
     logger.debug("Generating multiple diverse search queries via PromptBuilder")
-    multi_query_prompt = PromptBuilder.analysis_multi_query_generation(query)
+    multi_query_prompt = PromptBuilder.analysis_multi_query_generation(topic)
     multi_query_response = await agent.client.chat(messages=multi_query_prompt)
     logger.debug(f"Received multi-query response (length={len(multi_query_response)})")
 
-    # Parse the response into a list of queries (expecting JSON array or numbered list)
+    # Parse queries (JSON array or fallback to lines)
     try:
         queries = json.loads(multi_query_response)
         if not isinstance(queries, list):
@@ -85,118 +97,118 @@ async def perform_analysis(agent, query: str):
             if q.strip() and not q.startswith("#")
         ]
 
-    # Limit to reasonable number (3-6) to avoid token explosion
-    queries = queries[:6]
+    queries = queries[:6]  # limit to avoid token explosion
     if not queries:
-        queries = [query]  # fallback to original
-        logger.debug("No queries parsed, using original query as fallback")
+        queries = [topic]
+        logger.debug("No queries parsed — using original topic as fallback")
 
-    logger.info(f"Generated {len(queries)} sub-queries for analysis")
+    logger.info(f"Generated {len(queries)} sub-queries for research")
 
-    # Step 2: Accumulate results from GetContext for each generated query
     all_research = []
-    for sub_query in queries:
-        logger.debug(f"Executing GetContext for sub-query: {sub_query[:80]}...")
-        try:
-            result = await agent.manager.execute_direct(
-                "GetContext",
-                query=sub_query,
-            )
-            if result and str(result).strip():
-                all_research.append(f"--- Search for: {sub_query} ---\n{result}\n")
-                logger.debug(f"Retrieved {len(str(result))} chars for sub-query")
-            else:
-                logger.debug(f"No results returned for sub-query: {sub_query[:50]}...")
-        except Exception as e:
-            logger.error(f"Failed to execute GetContext for '{sub_query[:50]}...': {e}")
-            all_research.append(
-                f"--- Search for: {sub_query} ---\n[Error retrieving: {e}]\n"
-            )
+
+    # Local knowledgebase retrieval (GetContext)
+    if local:
+        logger.info(
+            f"Collecting local knowledgebase context via GetContext ({len(queries)} queries)"
+        )
+        for sub_query in queries:
+            logger.debug(f"Executing GetContext for: {sub_query[:80]}...")
+            try:
+                result = await agent.manager.execute_direct(
+                    "GetContext", query=sub_query
+                )
+                if result and str(result).strip():
+                    all_research.append(f"--- Local KB: {sub_query} ---\n{result}\n")
+                    logger.debug(f"Retrieved {len(str(result))} chars from GetContext")
+                else:
+                    logger.debug(f"No local results for sub-query: {sub_query[:50]}...")
+            except Exception as e:
+                logger.error(f"GetContext failed for '{sub_query[:50]}...': {e}")
+                all_research.append(f"--- Local KB: {sub_query} ---\n[Error: {e}]\n")
+
+    # Web research path
+    if web:
+        logger.info("Performing web search + indexing for external knowledge")
+        search_text = await agent.manager.execute_direct(
+            "search_web", query=topic, max_results=8
+        )
+        logger.debug(f"Web search completed | results_length={len(search_text)} chars")
+
+        indexed_count = 0
+        if (
+            not search_text.startswith("search_web error")
+            and "(no results)" not in search_text.lower()
+        ):
+            lines = search_text.split("\n\n")
+            for line in lines[:8]:
+                try:
+                    if "http" in line.lower():
+                        parts = line.split("\n")
+                        if len(parts) > 1:
+                            url = parts[1].strip()
+                            if url.startswith("http"):
+                                logger.debug(f"Indexing: {url[:80]}...")
+                                await agent.manager.execute_direct(
+                                    "index_web_page", url=url
+                                )
+                                indexed_count += 1
+                except Exception as idx_err:
+                    logger.error(f"Failed to index URL: {idx_err}")
+                    continue
+
+            if indexed_count > 0:
+                logger.info(f"Indexed {indexed_count} web pages into knowledgebase")
+                await asyncio.sleep(0.4)  # allow indexing to settle
+
+        # Re-query GetContext so newly indexed web content is included in the research chunk
+        logger.debug("Re-querying GetContext to pull in newly indexed web content")
+        for sub_query in queries:
+            try:
+                result = await agent.manager.execute_direct(
+                    "GetContext", query=sub_query
+                )
+                if result and str(result).strip():
+                    all_research.append(
+                        f"--- Web-enhanced KB: {sub_query} ---\n{result}\n"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Post-index GetContext failed for '{sub_query[:50]}...': {e}"
+                )
 
     combined_research = (
-        "\n".join(all_research) if all_research else "No relevant tool outcomes found."
+        "\n".join(all_research)
+        if all_research
+        else "No research data collected (both local and web disabled or empty)."
     )
-    logger.debug(f"Combined research context length: {len(combined_research)} chars")
-
-    # Step 3: Instruct LLM to generate a structured report
-    logger.debug("Synthesizing final structured report via LLM")
-    report_prompt = PromptBuilder.analysis_report_synthesis(query, combined_research)
-    final_report = await agent.client.chat(messages=report_prompt)
-    logger.info(
-        f"PerformAnalysis completed successfully | report_length={len(final_report)} chars"
+    logger.debug(
+        f"Final combined research context length: {len(combined_research)} chars"
     )
 
+    # Step 3: LLM synthesizes the structured report
+    logger.debug("Synthesizing professional structured report via LLM")
+    report_prompt = PromptBuilder.analysis_report_synthesis(topic, combined_research)
+    final_report = await agent.client.chat(
+        messages=report_prompt, max_tokens=agent.max_tokens
+    )
+    logger.info(f"LLM report synthesis completed | length={len(final_report)} chars")
+
+    # Optional file output via write_file tool
+    if file_output:
+        try:
+            write_result = await agent.manager.execute_direct(
+                "write_file",
+                file_path=file_output,
+                content=final_report,
+                append=False,
+            )
+            logger.info(
+                f"Report saved to file | path={file_output} | result={write_result}"
+            )
+            final_report += f"\n\n[Report also written to: {file_output}]"
+        except Exception as e:
+            logger.error(f"Failed to write report to {file_output}: {e}")
+            final_report += f"\n\n[ERROR: Could not save to file — {e}]"
+
+    logger.info("ConductResearch finished successfully")
     return final_report
-
-
-@tool(
-    "ResearchTools",
-    name="ResearchWeb",
-    description=(
-        "Use for external web research when the task requires up-to-date information not present in the local knowledgebase. "
-        "Automatically searches the web, indexes results, and then performs deep analysis using PerformAnalysis. "
-        "Only use when the query explicitly needs current external knowledge (e.g. latest papers, documentation, or real-time data)."
-    ),
-    tags=["web", "research", "investigate", "analysis", "report"],
-)
-async def research_web(agent, query: str, max_results: int = 5):
-    """Research a topic on the web and deliver a synthesized analysis report."""
-    if not query or not query.strip():
-        logger.warning("ResearchWeb called with empty query")
-        return "Error: Research query cannot be empty."
-
-    logger.info(
-        f"ResearchWeb started | query='{query[:100]}...' | max_results={max_results}"
-    )
-
-    # Step 1: Perform web search (do NOT use results directly — let them go into context via indexing)
-    logger.debug("Performing web search via search_web tool")
-    search_text = await agent.manager.execute_direct(
-        "search_web",
-        query=query,
-        max_results=max_results,
-    )
-    logger.debug(f"Web search completed | results_length={len(search_text)} chars")
-
-    # Step 2: Index the top results into the knowledge base (so they become tool outcomes)
-    indexed_count = 0
-    if (
-        not search_text.startswith("search_web error")
-        and "(no results)" not in search_text.lower()
-    ):
-        lines = search_text.split("\n\n")
-        for line in lines[:max_results]:
-            try:
-                if "http" in line.lower():
-                    parts = line.split("\n")
-                    if len(parts) > 1:
-                        url = parts[1].strip()
-                        if url.startswith("http"):
-                            logger.debug(f"Indexing web page: {url[:80]}...")
-                            await agent.manager.execute_direct(
-                                "index_web_page",
-                                url=url,
-                            )
-                            indexed_count += 1
-            except Exception as idx_err:
-                logger.error(f"Failed to index URL from search results: {idx_err}")
-                continue  # silent fail on individual indexing
-
-        if indexed_count > 0:
-            logger.info(f"Indexed {indexed_count} web pages into knowledge base")
-            # Small pause to allow indexing to settle into KB
-            await asyncio.sleep(0.3)
-    else:
-        logger.warning(
-            f"Web search failed or returned no usable results: {search_text[:100]}..."
-        )
-
-    # Step 3: Perform deep analysis using the new indexed web content + existing tool outcomes
-    logger.debug("Triggering PerformAnalysis on web research results + existing KB")
-    analysis_report = await agent.manager.execute_direct(
-        "PerformAnalysis",
-        query=f"Web research on: {query}. Analyze all recent tool outcomes including newly indexed web pages.",
-    )
-    logger.info(
-        f"ResearchWeb completed successfully | final_report_length={len(analysis_report)} chars"
-    )
