@@ -137,7 +137,7 @@ class ChatInput(TextArea):
             event.stop()
             self.insert("\n")
             return
-        
+
 
 # ============================================================
 # Main App
@@ -243,7 +243,6 @@ class LLMChatApp(App):
             await self.action_stop_stream()
             event.stop()
 
-
     # ====================== Persistent Agent Loop ======================
 
     async def run_chat_loop(self):
@@ -309,6 +308,7 @@ class LLMChatApp(App):
     async def _process_agent_event(
         self, event_type: str, payload: Any, message: ChatMessage
     ) -> None:
+        """Process events from the agent with proper message creation for final synthesis."""
         level = self.tool_info_level or "compact"
 
         if event_type == "phase_changed":
@@ -322,8 +322,12 @@ class LLMChatApp(App):
                     status_text = f"🔨 {phase}"
                 elif "executing" in phase.lower():
                     status_text = f"⚡ {phase.upper()}"
-                elif "synthesizing" in phase.lower() or "final" in phase.lower():
-                    status_text = f"✨ {phase.upper()}"
+                elif (
+                    "synthesizing" in phase.lower()
+                    or "final" in phase.lower()
+                    or "generating_final_answer" in phase.lower()
+                ):
+                    status_text = "✨ Generating final answer..."
                 elif "reflecting" in phase.lower():
                     status_text = f"🤔 {phase.upper()}"
                 else:
@@ -333,18 +337,50 @@ class LLMChatApp(App):
                 self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
-        elif event_type == "step_completed":
-            summary = payload.get("summary", "") or str(payload)
-            self._current_pure_text += f"\n✅ **Step completed**\n{summary}\n\n"
-            await self._ui_update(message, immediate=True)
-            return
-
-        elif event_type == "tool_name":  # ← ADD THIS BLOCK
+        elif event_type == "tool_name":
             name = payload.get("name", "unknown")
             message.update_status(
                 f"{self.SPINNERS[self._spinner_idx % len(self.SPINNERS)]} using **{name}**"
             )
             self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNERS)
+            return
+
+        elif event_type == "content_delta":
+            # CRITICAL FIX: Always ensure we have an active message for content_delta
+            if self._current_assistant_msg is None:
+                assistant_msg = ChatMessage("assistant", "")
+                self.chat.add(assistant_msg)
+                self._current_assistant_msg = assistant_msg
+                self._current_pure_text = ""
+                self._current_tool_buffer = ""
+                self._last_finished = False
+                logger.debug("[UI] Created new assistant message for content_delta")
+
+            self._current_pure_text += str(payload or "")
+            await self._ui_update(self._current_assistant_msg)
+            return
+
+        elif event_type == "llm_response":
+            full_reply = payload.get("full_reply", "").strip()
+            if full_reply:
+                if self._current_assistant_msg is None:
+                    assistant_msg = ChatMessage("assistant", "")
+                    self.chat.add(assistant_msg)
+                    self._current_assistant_msg = assistant_msg
+                    logger.debug("[UI] Created new assistant message for llm_response")
+
+                # Only set if it's a real final reply (not the short "Task completed successfully")
+                if len(full_reply) > 50 or "synthesis" in str(payload).lower():
+                    self._current_pure_text = full_reply
+                await self._ui_update(self._current_assistant_msg, immediate=True)
+                self._current_assistant_msg.clear_status()
+                self.chat.call_after_refresh(self.chat._scroll_to_bottom)
+            return
+
+        elif event_type == "step_completed":
+            summary = payload.get("summary", "") or str(payload)
+            self._current_pure_text += f"\n✅ **Step completed**\n{summary}\n\n"
+            await self._ui_update(message, immediate=True)
             return
 
         elif event_type == "step_failed":
@@ -363,20 +399,6 @@ class LLMChatApp(App):
                 self._current_pure_text += f"{i}. {step}\n"
             self._current_pure_text += "\n"
             await self._ui_update(message, immediate=True)
-            return
-
-        elif event_type == "content_delta":
-            self._current_pure_text += payload
-            await self._ui_update(message)
-            return
-
-        elif event_type == "llm_response":
-            full_reply = payload.get("full_reply", "").strip()
-            if full_reply:
-                self._current_pure_text = full_reply
-                await self._ui_update(message, immediate=True)
-                message.clear_status()
-                self.chat.call_after_refresh(self.chat._scroll_to_bottom)
             return
 
         elif event_type == "needs_confirmation":
@@ -401,7 +423,7 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
             return
 
-        # ====================== FINAL ANSWER - STRONG SCROLL FIX ======================
+        # ====================== FINAL ANSWER ======================
         elif event_type == "finish":
             reason = payload.get("reason", "unknown")
 
@@ -422,9 +444,9 @@ class LLMChatApp(App):
                     {"role": "assistant", "content": final_content}
                 )
 
-            message.clear_status()
+            if self._current_assistant_msg:
+                self._current_assistant_msg.clear_status()
 
-            # Aggressive scroll for final answer
             await self.chat.ensure_final_scroll()
 
             self._current_assistant_msg = None
@@ -442,7 +464,8 @@ class LLMChatApp(App):
             await self._ui_update(message, immediate=True)
 
             if event_type in ("cancelled", "error"):
-                message.clear_status()
+                if self._current_assistant_msg:
+                    self._current_assistant_msg.clear_status()
                 self._current_assistant_msg = None
                 self._current_pure_text = ""
                 self._current_tool_buffer = ""
