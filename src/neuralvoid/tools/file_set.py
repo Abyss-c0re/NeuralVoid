@@ -5,7 +5,7 @@ import aiofiles
 from typing import AsyncIterable, List
 from neuralcore.actions.registry import tool, sequenced
 
-from neuralcore.utils.file_helpers import _read_file
+from neuralcore.utils.file_helpers import _read_file, _collect_text_files
 
 from neuralcore.utils.logger import Logger
 
@@ -31,9 +31,9 @@ IGNORE_DIRS = {
 
 @tool(
     "FileEditingTools",
-    tags=["file", "write", "edit"],
+    tags=["file", "write"],
     name="write_file",
-    description="Write or append text content to a file.",
+    description="Write or append (auto newline).",
 )
 async def write_file(file_path: str, content: str, append: bool = False) -> str:
     mode = "a" if append else "w"
@@ -42,17 +42,18 @@ async def write_file(file_path: str, content: str, append: bool = False) -> str:
             if content and not content.endswith("\n"):
                 content += "\n"
             await f.write(content)
-        action = "Appended to" if append else "Wrote"
-        return f"{action} '{file_path}' ({len(content)} chars)"
+        return (
+            f"✅ {'Appended' if append else 'Wrote'} {file_path} ({len(content)} chars)"
+        )
     except Exception as e:
-        return f"Error writing '{file_path}': {str(e)}"
+        return f"❌ write_file error: {e}"
 
 
 @tool(
     "FileEditingTools",
     tags=["file", "edit"],
     name="replace_block",
-    description="Replace exact text block inside a file.",
+    description="Exact block replace with safety checks.",
 )
 async def replace_block(
     file_path: str, old_content: str, new_content: str, replace_all: bool = False
@@ -62,175 +63,92 @@ async def replace_block(
             text = await f.read()
         count = text.count(old_content)
         if count == 0:
-            return f"Error: old_content not found in '{file_path}'"
+            return f"❌ old_content not found"
         if count > 1 and not replace_all:
-            return f"Error: old_content appears {count} times. Set replace_all=True."
+            return f"⚠️ Appears {count} times — set replace_all=True"
         new_text = text.replace(old_content, new_content, count if replace_all else 1)
         async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
             await f.write(new_text)
-        replaced = count if replace_all else 1
-        return f"Replaced {replaced} occurrence(s) in '{file_path}'"
-    except FileNotFoundError:
-        return f"File not found: '{file_path}'"
+        return f"✅ Replaced {count if replace_all else 1} occurrence(s)"
     except Exception as e:
-        return f"Error replacing in '{file_path}': {str(e)}"
+        return f"❌ replace_block error: {e}"
 
 
 @tool(
     "FileEditingTools",
-    tags=["file", "read"],
+    tags=["file", "read", "universal"],
     name="read_file",
-    description="Universal file reader. Automatically detects type and streams large files. "
-    "Supports: .txt, .md, .py, .pdf, .docx, .png, .jpg, .jpeg, .webp, etc.",
+    description="Universal reader (text/images/PDF/docx) with streaming fallback.",
 )
 async def read_file(
     agent, file_path: str, image_prompt: str = "Describe this image in detail."
 ) -> str | AsyncIterable[str]:
-
     return await _read_file(agent, file_path, image_prompt)
 
 
 @tool(
     "FileEditingTools",
-    tags=["file", "read", "batch"],
+    tags=[
+        "file",
+        "batch",
+    ],
     name="read_multiple_files",
-    description="Read multiple files at once using the universal read_file. "
-    "Optionally triggers summarization/indexing of the results.",
+    description="Batch read + optional GetContext summary.",
 )
-async def read_multiple_files(
-    agent,
-    files: List[str],
-    summary: bool = False,
-) -> str:
-    """Reads multiple files via the universal read_file tool.
-    If summary=True, it triggers GetContext to create a consolidated summary."""
+async def read_multiple_files(agent, files: List[str], summary: bool = True) -> str:
     if not files:
-        return "No files provided."
-
-    indexed_files = []
-    errors = []
-
-    for file_path in files:
+        return "❌ No files"
+    indexed = []
+    for fp in files:
         try:
-            # Use execute_direct to leverage the full universal read_file (streaming + dispatch)
-            await agent.manager.execute_direct(
-                "read_file",
-                file_path=file_path,
-            )
-
-            file_name = os.path.basename(file_path)
-            indexed_files.append(file_name)
-
-        except Exception as e:
-            errors.append(f"{os.path.basename(file_path)}: {str(e)}")
-
-    # Final response
-    if summary and indexed_files:
+            await agent.manager.execute_direct("read_file", file_path=fp)
+            indexed.append(os.path.basename(fp))
+        except Exception:
+            pass
+    if summary and indexed:
         try:
-            # Trigger summarization over the just-read files
-            summary_result = await agent.manager.execute_direct(
-                "GetContext",  # assuming this tool exists in your registry
-                query=" ".join(indexed_files),  # or better query if you have one
+            s = await agent.manager.execute_direct(
+                "GetContext",
+                query=f"Detailed technical summary of: {', '.join(indexed)}. Focus on architecture and key logic.",
             )
-            return (
-                f"✅ Read and summarized {len(indexed_files)} files:\n{summary_result}"
-            )
-        except Exception as e:
-            logger.warning(f"Summary failed after reading files: {e}")
-
-    if errors:
-        error_msg = f" ({len(errors)} errors)" if errors else ""
-        return f"✅ Indexed {len(indexed_files)} files{error_msg}: " + ", ".join(
-            indexed_files
-        )
-
-    return "✅ Files indexed: " + ", ".join(indexed_files)
+            return f"✅ Read & summarized {len(indexed)} files\n\n{s}"
+        except Exception:
+            pass
+    return f"✅ Indexed {len(indexed)} files: {', '.join(indexed)}"
 
 
 @tool(
     "FileEditingTools",
-    tags=["file", "folder", "read"],
+    tags=["file", "folder"],
     name="read_folder",
-    description="Recursively read all text/code files in a folder using read_multiple_files. "
-    "Returns a simple confirmation that the folder content was indexed.",
+    description="Recursively read folder using text detection + read_multiple_files.",
 )
 async def read_folder(
     agent,
     folder_path: str,
     recursive: bool = True,
-    max_files: int = 50,  # reasonable default to prevent explosion
+    max_files: int = 60,
+    summary: bool = False,
 ) -> str:
-    """Collects all readable files in the folder and delegates to read_multiple_files."""
     if not os.path.isdir(folder_path):
-        return f"Error: Folder '{folder_path}' not found."
-
-    files_to_read: List[str] = []
-    files_read = 0
-
-    for root, dirs, files in os.walk(folder_path):
-        if not recursive:
-            dirs.clear()
-
-        # Skip ignored directories
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-
-        for f in sorted(files):
-            file_path = os.path.join(root, f)
-
-            # Only read text/code-like files (you can expand this list)
-            if any(
-                f.lower().endswith(ext)
-                for ext in [
-                    ".txt",
-                    ".md",
-                    ".py",
-                    ".js",
-                    ".ts",
-                    ".json",
-                    ".yaml",
-                    ".yml",
-                    ".sh",
-                    ".html",
-                    ".css",
-                    ".rst",
-                    ".toml",
-                    ".ini",
-                    ".cfg",
-                ]
-            ):
-                if files_read >= max_files:
-                    break
-                files_to_read.append(file_path)
-                files_read += 1
-
-        if files_read >= max_files:
-            break
-
-    if not files_to_read:
-        return (
-            f"Folder '{os.path.basename(folder_path)}' contains no readable text files."
-        )
-
-    # Delegate to the new batch reader
-    folder_name = os.path.basename(folder_path) or "root"
+        return f"❌ Folder not found: {folder_path}"
+    files = await _collect_text_files(folder_path, recursive, max_files)
+    if not files:
+        return f"ℹ️ No text files in {os.path.basename(folder_path)}"
     try:
-        await agent.manager.execute_direct(
-            "read_multiple_files",
-            files=files_to_read,
-            summary=False,
+        res = await agent.manager.execute_direct(
+            "read_multiple_files", files=files, summary=summary
         )
-        return f"✅ Content of folder '{folder_name}' was indexed ({len(files_to_read)} files)."
-
+        return f"✅ Folder processed ({len(files)} files)\n{res}"
     except Exception as e:
-        logger.error(f"read_folder failed for '{folder_path}': {e}", exc_info=True)
-        return f"Error processing folder '{folder_name}': {str(e)}"
+        return f"❌ read_folder error: {e}"
 
 
 @tool(
     "FileEditingTools",
-    tags=["file", "edit", "diff"],
+    tags=["file", "diff"],
     name="apply_diff",
-    description="Apply a unified diff patch to a file (safe preview first).",
+    description="git apply unified diff (safe, confirmation required)",
     require_confirmation=True,
 )
 async def apply_diff(file_path: str, diff_content: str) -> str:
@@ -243,9 +161,9 @@ async def apply_diff(file_path: str, diff_content: str) -> str:
             "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         await check.communicate(diff_content.encode())
-
         result = await asyncio.create_subprocess_exec(
             "git",
             "apply",
@@ -255,16 +173,16 @@ async def apply_diff(file_path: str, diff_content: str) -> str:
             stdout=asyncio.subprocess.PIPE,
         )
         await result.communicate(diff_content.encode())
-        return f"Successfully applied diff to '{file_path}'"
+        return f"✅ Diff applied to {file_path}"
     except Exception as e:
-        return f"apply_diff failed: {str(e)}"
+        return f"❌ apply_diff error: {e}"
 
 
 @tool(
     "FileEditingTools",
-    tags=["file", "edit", "regex"],
+    tags=["file", "regex"],
     name="regex_replace",
-    description="Regex-based find and replace in a file (with dry-run option).",
+    description="Regex replace with dry-run.",
 )
 async def regex_replace(
     file_path: str, pattern: str, replacement: str, dry_run: bool = True
@@ -274,21 +192,24 @@ async def regex_replace(
     try:
         async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
             content = await f.read()
-        new_content, count = re.subn(pattern, replacement, content)
+        new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
         if dry_run:
-            return f"Dry-run: would replace {count} occurrence(s) in '{file_path}'"
+            return f"🔍 Dry-run: {count} replacements\nPreview:\n{new_content[:400]}..."
         async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
             await f.write(new_content)
-        return f"Replaced {count} occurrence(s) using regex in '{file_path}'"
+        return f"✅ Replaced {count} occurrences"
     except Exception as e:
-        return f"regex_replace error: {str(e)}"
+        return f"❌ regex_replace error: {e}"
 
 
+# ─────────────────────────────────────────────────────────────
+# SEQUENCED WORKFLOW
+# ─────────────────────────────────────────────────────────────
 @sequenced(
     name="find_and_read_file",
-    description="Search for a file by name and automatically read the first match",
+    description="Search filename → auto-read first match.",
     set_name="FileEditingTools",
-    tags=["file", "search", "read", "workflow"],
+    tags=["read", "find", "file"],
     propagate=False,
     output_from="read_file",
     dependencies={
