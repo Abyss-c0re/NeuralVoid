@@ -195,6 +195,7 @@ app:
     base_folder: "~/.neuralcore/kb"     # Root folder for all indexed data
     auto_reindex: true                  # Automatically watch for file changes
     reindex_interval_seconds: 300
-    min_similarity_threshold: 0.29
+    default_retrieve_k: 100
+    min_similarity_threshold: 0.15
     direct_match_boost: 0.18
     direct_match_threshold: 0.23
