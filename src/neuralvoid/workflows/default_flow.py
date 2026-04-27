@@ -164,96 +164,108 @@ async def chat_tool_loop(agent, state: AgentState):
     )
 
     intent = await classify_intent(agent, content)
+    logger.debug(f"Intent {intent}")
 
-    if intent == "CASUAL" and content:
-        logger.info("[CASUAL MODE] Pure basic chat — no inner loop")
-        yield ("phase_changed", {"phase": "casual_chat"})
+    if content:
+        if intent == "CASUAL":
+            logger.info("[CASUAL MODE] Pure basic chat — no inner loop")
+            yield ("phase_changed", {"phase": "casual_chat"})
 
-        casual_messages = await agent.context_manager.provide_context(
-            query=content,
-            max_input_tokens=agent.max_tokens * 0.65,
-            reserved_for_output=agent.client.max_tokens * 0.35,
-            include_logs=True,
-            chat=True,
-        )
-
-        final_reply = await agent.client.chat(
-            casual_messages,
-            temperature=0.85,
-            top_p=0.95,
-            max_tokens=agent.client.max_tokens * 0.4,
-        )
-
-        await agent.add_message("assistant", final_reply)
-        yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-
-        agent.message_queue.task_done()
-
-        state.request_loop_restart(
-            reason="Casual chat completed, waiting for next message",
-            target_loop=target_loop,
-        )
-        return  # clean exit after signaling
-
-    # === TASK-DRIVEN MODE ===
-    logger.info("[TASK-DRIVEN MODE] Delegating to goal_driven_loop")
-    yield ("phase_changed", {"phase": "goal_driven"})
-    state.reset_for_new_task(new_task=content)
-
-    # ====================== ONE-TIME PLANNING ======================
-    if not state.planned_tasks:
-        async for event, payload in plan_tasks_unified(agent, state):
-            yield event, payload
-
-    # Forward inner loop events
-    async for event, payload in agent.execute_loop(
-        "goal_driven_loop", initial_state=state
-    ):
-        yield event, payload
-
-        if event in ("error", "cancelled", "loop_stopped"):
-            state.request_loop_stop(
-                reason=f"Inner loop signaled {event}", target_loop=target_loop
+            casual_messages = await agent.context_manager.provide_context(
+                query=content,
+                max_input_tokens=agent.max_tokens * 0.65,
+                reserved_for_output=agent.client.max_tokens * 0.35,
+                include_logs=True,
+                chat=True,
             )
-            return
 
-    logger.info(
-        "[TASK-DRIVEN MODE] Inner goal_driven_loop completed — back to outer chat"
-    )
+            logger.debug(f"Chat Context: {(str(casual_messages))}")
 
-    # ====================== FINAL SYNTHESIS (fallback only) ======================
-    if state.goal_reached:
-        yield ("phase_changed", {"phase": "generating_final_answer"})
+            final_reply = await agent.client.chat(
+                casual_messages,
+                temperature=0.85,
+                top_p=0.95,
+                max_tokens=agent.client.max_tokens * 0.4,
+            )
 
-        results = await agent.context_manager.provide_context(
-            query=content,
-            lightweight_agentic=True,
-            max_input_tokens=agent.client.max_tokens * 0.65,
-            reserved_for_output=agent.client.max_tokens * 0.4,
-        )
-        final_reply = await agent.client.chat(
-            results, temperature=0.0, top_p=0.1, max_tokens=agent.client.max_tokens
-        )
-        await agent.add_message("assistant", final_reply)
-        yield (
-            "llm_response",
-            {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-        )
-        logger.info("Task completed successfully → full reset")
-        state.reset_for_new_task()
-    else:
-        logger.warning("Loop ended without explicit goal or restart – forcing restart")
-        state.request_loop_restart(reason="Fallback restart", target_loop=target_loop)
-        yield ("phase_changed", {"phase": "restarting_loop"})
+            await agent.add_message("assistant", final_reply)
+            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
 
-    if not state.goal_reached:
-        state.status = "idle"
-        state.is_complete = True
-    # Restart outer loop for next user input
-    state.request_loop_restart(
-        reason="Inner goal_driven_loop finished, returning to chat",
-        target_loop=target_loop,
-    )
+            agent.message_queue.task_done()
+            state.reset_for_new_task()
+
+            state.request_loop_restart(
+                reason="Casual chat completed, waiting for next message",
+                target_loop=target_loop,
+            )
+        else:
+            # === TASK-DRIVEN MODE ===
+            logger.info("[TASK-DRIVEN MODE] Delegating to goal_driven_loop")
+            yield ("phase_changed", {"phase": "goal_driven"})
+            state.reset_for_new_task(new_task=content)
+
+            # ====================== ONE-TIME PLANNING ======================
+            if not state.planned_tasks:
+                async for event, payload in plan_tasks_unified(agent, state):
+                    yield event, payload
+
+            # Forward inner loop events
+            async for event, payload in agent.execute_loop(
+                "goal_driven_loop", initial_state=state
+            ):
+                yield event, payload
+
+                if event in ("error", "cancelled", "loop_stopped"):
+                    state.request_loop_stop(
+                        reason=f"Inner loop signaled {event}", target_loop=target_loop
+                    )
+                    return
+
+            logger.info(
+                "[TASK-DRIVEN MODE] Inner goal_driven_loop completed — back to outer chat"
+            )
+
+            # ====================== FINAL SYNTHESIS (fallback only) ======================
+            if state.goal_reached:
+                yield ("phase_changed", {"phase": "generating_final_answer"})
+
+                results = await agent.context_manager.provide_context(
+                    query=content,
+                    lightweight_agentic=True,
+                    max_input_tokens=agent.client.max_tokens * 0.65,
+                    reserved_for_output=agent.client.max_tokens * 0.4,
+                    return_as_string=True,
+                )
+                logger.debug(f"Final Context: {results}")
+                final_reply = await agent.client.chat(
+                    results,
+                    temperature=0.0,
+                    top_p=0.1,
+                    max_tokens=agent.client.max_tokens,
+                )
+                yield (
+                    "llm_response",
+                    {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+                )
+                logger.info("Task completed successfully → full reset")
+                state.reset_for_new_task()
+            else:
+                logger.warning(
+                    "Loop ended without explicit goal or restart – forcing restart"
+                )
+                state.request_loop_restart(
+                    reason="Fallback restart", target_loop=target_loop
+                )
+                yield ("phase_changed", {"phase": "restarting_loop"})
+
+            if not state.goal_reached:
+                state.status = "idle"
+                state.is_complete = True
+            # Restart outer loop for next user input
+            state.request_loop_restart(
+                reason="Inner goal_driven_loop finished, returning to chat",
+                target_loop=target_loop,
+            )
 
 
 # ==================== MAIN FLOWS ====================
