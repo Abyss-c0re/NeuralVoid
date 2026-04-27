@@ -189,6 +189,7 @@ app:
   cognition:
     reranker_enabled: true
     novelty_threshold: 0.82
+    novelty_k: 100
   knowledge_base:
     enabled: true
     base_folder: "~/.neuralcore/kb"     # Root folder for all indexed data
