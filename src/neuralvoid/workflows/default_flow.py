@@ -175,7 +175,7 @@ async def chat_tool_loop(agent, state: AgentState):
                 query=content,
                 max_input_tokens=agent.max_tokens * 0.65,
                 reserved_for_output=agent.client.max_tokens * 0.35,
-                include_logs=True,
+                include_logs=False,
                 chat=True,
             )
 
