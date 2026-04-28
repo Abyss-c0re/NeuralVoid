@@ -310,7 +310,7 @@ async def os_info() -> str:
     Keeps NeuralCore clean and reusable.
     """
     try:
-        result = await get_os_info()
+        result =  get_os_info()
         return str(result)
     except Exception as e:
         import platform

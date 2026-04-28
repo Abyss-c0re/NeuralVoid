@@ -26,7 +26,7 @@ logger = Logger.get_logger()
         "memory",
         "knowledgebase",
     ],
-    record_to_context=False,
+    record_to_context=True,
 )
 async def provide_context(agent, query: str):
     results = await agent.context_manager.provide_context(
