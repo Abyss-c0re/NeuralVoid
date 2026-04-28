@@ -206,7 +206,7 @@ class HeadlessAgentRunner:
                             "Agent does not implement on_background_event hook"
                         )
 
-                # ── Local console + status file handling (unchanged) ──
+                # ── Local console + status file handling ──
                 if event_type == "phase_changed":
                     current_phase = payload.get("phase", current_phase)
                     self._write_status(
