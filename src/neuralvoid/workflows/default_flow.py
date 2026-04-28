@@ -50,7 +50,7 @@ def goal_achieved(state: AgentState, args=None) -> bool:
         or state.current_task_index >= len(state.planned_tasks) - 1
     )
 
-    # ==================== NEW: Marker + Tool Success Logic (relocated here) ====================
+    # ====================  Marker + Tool Success Logic (relocated here) ====================
     marker = PromptBuilder.FINAL_ANSWER_MARKER
     has_marker_in_reply = marker in full_reply
 
