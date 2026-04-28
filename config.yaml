@@ -190,6 +190,8 @@ app:
     reranker_enabled: true
     novelty_threshold: 0.82
     novelty_k: 100
+    max_rerank_candidates: 100      # ← how many to rerank
+    semantic_weight: 0.28
   knowledge_base:
     enabled: true
     base_folder: "~/.neuralcore/kb"     # Root folder for all indexed data
