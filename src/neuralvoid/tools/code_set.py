@@ -25,7 +25,7 @@ IGNORE_FILES = {".DS_Store", "Thumbs.db", ".gitignore"}
 
 
 # ─────────────────────────────────────────────────────────────
-# CODING TOOLS 
+# ORIGINAL CODING TOOLS
 # ─────────────────────────────────────────────────────────────
 
 
@@ -187,7 +187,7 @@ async def get_project_structure(folder_path: str = ".", max_depth: int = 4) -> s
 
 
 # ─────────────────────────────────────────────────────────────
-# GIT TOOLS 
+# GIT TOOLS
 # ─────────────────────────────────────────────────────────────
 
 
@@ -299,7 +299,7 @@ def _init_tree_sitter():
 
     errors = []
     try:
-        from tree_sitter import Language, # type: ignore
+        from tree_sitter import Language
     except Exception as e:
         errors.append(f"tree_sitter core: {e}")
         TREE_SITTER_AVAILABLE = False
@@ -407,7 +407,7 @@ async def _read_file_content(agent, file_path: str) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────
-# SYMBOL EXTRACTION (LLM-friendly, robust across languages)
+# SYMBOL EXTRACTION
 # ─────────────────────────────────────────────────────────────
 
 
@@ -518,7 +518,7 @@ def _extract_symbols(tree, source: bytes, lang_name: str) -> List[Dict[str, Any]
 
 
 # ─────────────────────────────────────────────────────────────
-# TREE-SITTER TOOLS (async + use agent.read_file)
+# TREE-SITTER TOOLS
 # ─────────────────────────────────────────────────────────────
 
 
