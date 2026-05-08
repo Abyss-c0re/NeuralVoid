@@ -101,13 +101,13 @@ async def read_multiple_files(agent, files: List[str], summary: bool = True) -> 
     indexed = []
     for fp in files:
         try:
-            await agent.manager.execute_direct("read_file", file_path=fp)
+            await agent.action_manager.execute_direct("read_file", file_path=fp)
             indexed.append(os.path.basename(fp))
         except Exception:
             pass
     if summary and indexed:
         try:
-            s = await agent.manager.execute_direct(
+            s = await agent.action_manager.execute_direct(
                 "GetContext",
                 query=f"Detailed technical summary of: {', '.join(indexed)}. Focus on architecture and key logic.",
             )
@@ -136,7 +136,7 @@ async def read_folder(
     if not files:
         return f"ℹ️ No text files in {os.path.basename(folder_path)}"
     try:
-        res = await agent.manager.execute_direct(
+        res = await agent.action_manager.execute_direct(
             "read_multiple_files", files=files, summary=summary
         )
         return f"✅ Folder processed ({len(files)} files)\n{res}"

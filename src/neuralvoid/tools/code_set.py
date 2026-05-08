@@ -49,7 +49,7 @@ async def index_codebase(
 
     for file_path in files:
         try:
-            await agent.manager.execute_direct("read_file", file_path=file_path)
+            await agent.action_manager.execute_direct("read_file", file_path=file_path)
             indexed += 1
         except Exception as e:
             logger.debug(f"index skip {file_path}: {e}")
@@ -83,7 +83,7 @@ async def read_codebase(
         lines.append(f"{indent}📄 {rel}")
 
         try:
-            content_result = await agent.manager.execute_direct(
+            content_result = await agent.action_manager.execute_direct(
                 "read_file", file_path=file_path
             )
 
@@ -139,7 +139,7 @@ async def search_code(
 
     for file_path in files:
         try:
-            content = await agent.manager.execute_direct(
+            content = await agent.action_manager.execute_direct(
                 "read_file", file_path=file_path
             )
             if isinstance(content, str):
@@ -383,7 +383,7 @@ async def _read_file_content(agent, file_path: str) -> bytes:
     Handles both str return and streaming return.
     """
     try:
-        content_result = await agent.manager.execute_direct(
+        content_result = await agent.action_manager.execute_direct(
             "read_file", file_path=file_path
         )
 

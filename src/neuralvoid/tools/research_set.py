@@ -114,7 +114,7 @@ async def conduct_research(
         for sub_query in queries:
             logger.debug(f"Executing GetContext for: {sub_query[:80]}...")
             try:
-                result = await agent.manager.execute_direct(
+                result = await agent.action_manager.execute_direct(
                     "GetContext", query=sub_query
                 )
                 if result and str(result).strip():
@@ -129,7 +129,7 @@ async def conduct_research(
     # Web research path
     if web:
         logger.info("Performing web search + indexing for external knowledge")
-        search_text = await agent.manager.execute_direct(
+        search_text = await agent.action_manager.execute_direct(
             "search_web", query=topic, max_results=8
         )
         logger.debug(f"Web search completed | results_length={len(search_text)} chars")
@@ -148,7 +148,7 @@ async def conduct_research(
                             url = parts[1].strip()
                             if url.startswith("http"):
                                 logger.debug(f"Indexing: {url[:80]}...")
-                                await agent.manager.execute_direct(
+                                await agent.action_manager.execute_direct(
                                     "index_web_page", url=url
                                 )
                                 indexed_count += 1
@@ -164,7 +164,7 @@ async def conduct_research(
         logger.debug("Re-querying GetContext to pull in newly indexed web content")
         for sub_query in queries:
             try:
-                result = await agent.manager.execute_direct(
+                result = await agent.action_manager.execute_direct(
                     "GetContext", query=sub_query
                 )
                 if result and str(result).strip():
@@ -196,7 +196,7 @@ async def conduct_research(
     # Optional file output via write_file tool
     if file_output:
         try:
-            write_result = await agent.manager.execute_direct(
+            write_result = await agent.action_manager.execute_direct(
                 "write_file",
                 file_path=file_output,
                 content=final_report,
