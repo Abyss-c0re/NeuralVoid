@@ -23,12 +23,12 @@ clients:
       - target: ask
         name: quick_answer
         description: "Fast single-turn answer"
-        tags: [ "fast", "qa", "cheap" ]
+        tags: ["fast", "qa", "cheap"]
 
       - target: chat
         name: short_chat
         description: "Short conversational response"
-        tags: [ "chat", "fast" ]
+        tags: ["chat", "fast"]
 
   reasoning:
     type: chat
@@ -53,12 +53,12 @@ clients:
       - target: ask
         name: deep_think
         description: "Careful multi-step reasoning for complex problems"
-        tags: [ "reasoning", "planning", "slow", "accurate" ]
+        tags: ["reasoning", "planning", "slow", "accurate"]
 
       - target: chat
         name: structured_reasoning
         description: "Multi-turn structured reasoning conversation"
-        tags: [ "reasoning", "chat", "analysis" ]
+        tags: ["reasoning", "chat", "analysis"]
 
     # embeddings:
     #   type: embeddings
@@ -88,31 +88,11 @@ tools:
       - research_set
 
 workflows:
-  deploy_chat:
-    name: "deploy_chat"
+  deploy_agent:
+    name: "deploy_agent"
     description: "Persistent natural conversation mode for Deploy Agent"
     steps:
-      - name: deploy_chat_loop
-
-  # Orchestrator: Matches main.py exactly
-  orchestrator:
-    name: "orchestrator"
-    description: "Orchestrator: Plans → deploys sub-agents → waits → validates"
-    steps:
-      - name: plan_microtasks
-      - name: launch_next_subtask # <--- Must match Python code
-      - name: wait_for_subtask
-      - name: check_orchestrator_complete # <--- Matches Python code
-
-  # Sub-agent workflow: Classic ReAct loop
-  sub_agent_execute:
-    name: "sub_agent_execute"
-    description: "Classic ReAct execution loop used by all sub-agents"
-    steps:
-      - name: llm_stream
-      - name: sub_agent_check_complete
-        if:
-          is_complete: true
+      - name: deploy_agent_loop
 
 agents:
   agent_001:
@@ -131,7 +111,7 @@ agents:
       - CodingTools
       - WebTools
       - ResearchTools
-    workflow: orchestrator
+    workflow: deploy_agent
 
   agent_002:
     id: "agent_002"
@@ -150,7 +130,7 @@ agents:
       - CodingTools
       - WebTools
       - ResearchTools
-    workflow: deploy_chat
+    workflow: deploy_agent
 
   sub_agent_002:
     id: "sub_agent_002"
@@ -168,7 +148,7 @@ agents:
       - TerminalTools
       - ResearchTools
 
-    workflow: sub_agent_execute
+    workflow: deploy_agent
 
 # Optional: Global defaults / settings
 settings:
@@ -190,13 +170,13 @@ app:
     reranker_enabled: true
     novelty_threshold: 0.82
     novelty_k: 100
-    max_rerank_candidates: 100      # ← how many to rerank
+    max_rerank_candidates: 100 # ← how many to rerank
     semantic_weight: 0.28
     recency_decay_lambda: 0.06
   knowledge_base:
     enabled: true
-    base_folder: "~/.neuralcore/kb"     # Root folder for all indexed data
-    auto_reindex: true                  # Automatically watch for file changes
+    base_folder: "~/.neuralcore/kb" # Root folder for all indexed data
+    auto_reindex: true # Automatically watch for file changes
     reindex_interval_seconds: 300
     default_retrieve_k: 100
     min_similarity_threshold: 0.15
