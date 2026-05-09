@@ -46,10 +46,11 @@ def main():
         - Inside the app folder""")
         sys.exit(1)
 
+    # ───────────────────────────── AGENT ───────────────────────────
     if args.agent:
         # User-provided --agent always takes highest priority
         agent_id = args.agent
-    elif args.deploy:
+    elif args.deploy is not None:
         # Headless mode default
         agent_id = "agent_001"
     else:
@@ -57,11 +58,10 @@ def main():
         agent_id = "agent_002"
 
     agent = loader.load_agent_from_config(agent_id)
-    agent = loader.load_agent_from_config(agent_id)
     AgentFlow(agent)  # loading default workflows.
 
     # ── Headless mode ─────────────────────────────────────────────
-    if args.deploy:
+    if args.deploy is not None:
         from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
         runner = HeadlessAgentRunner(
@@ -71,14 +71,16 @@ def main():
             status_update_throttle_sec=args.throttle_sec,
         )
 
-        prompt = args.deploy.strip()
+        # Optional prompt support (None = task-ready / autonomous mode)
+        prompt = args.deploy.strip() if args.deploy else None
+
         agent_cfg = loader.get_agent_config(agent_id)
 
         max_iterations = args.max_iterations or agent_cfg.get("max_iterations", 10)
         max_tokens = args.max_tokens or agent_cfg.get("max_tokens", 12000)
 
         print(f"   Deploying headless agent '{agent.name}'")
-        print(f"   Prompt       : {prompt}")
+        print(f"   Prompt       : {prompt or '<none - task-ready / autonomous mode>'}")
         print(f"   Status file  : {Path(args.status_file).resolve()}")
         print(f"   PID file     : {Path(args.pid_file).resolve()}")
         print(f"   Max iterations: {max_iterations}")

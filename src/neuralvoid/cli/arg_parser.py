@@ -43,10 +43,13 @@ class CLIParser:
         self.parser.add_argument(
             "--deploy",
             type=str,
-            metavar="PROMPT",
+            nargs="?",
+            const="",
             default=None,
-            help="Deploy headless agent with this prompt.\n"
-            'Example: --deploy "Summarize the project and create a TODO list"',
+            metavar="[PROMPT]",
+            help="Deploy headless agent.\n"
+            '  - With prompt: --deploy "Summarize the project and create a TODO list"\n'
+            "  - Without prompt: --deploy (starts in task-ready / autonomous state)",
         )
 
         self.parser.add_argument("--config", type=str, help="Path to config file")
@@ -65,7 +68,7 @@ class CLIParser:
 
         deploy_group.add_argument(
             "--status-file",
-            type=self._json_file_path,  # <- validate JSON path extension only
+            type=self._json_file_path,
             default="/tmp/neuralvoid/agent.status.json",
             metavar="PATH",
             help="Location of the agent status JSON file (must end with .json, default: %(default)s)",

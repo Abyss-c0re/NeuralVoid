@@ -20,8 +20,10 @@ logger = Logger.get_logger()
 class HeadlessAgentRunner:
     """
     Headless runner with bidirectional WebSocket support.
-    Uses agent.run(chat_mode=False) as requested.
-    All custom communication lives in NeuralVoid.
+    Supports both:
+      - Traditional mode with initial prompt
+      - Pure listening mode (prompt=None/empty) → waits for WS "send"/"control" messages
+    Uses agent.run(chat_mode=False) and keeps AgentState as the single source of truth.
     """
 
     def __init__(
@@ -76,7 +78,7 @@ class HeadlessAgentRunner:
             if self._start_time
             else None,
             "last_update": now.isoformat() + "Z",
-            "prompt": prompt,
+            "prompt": prompt or "",                    # ← safe for None/empty
             "current_iteration": iteration,
             "last_tool": last_tool,
             "current_phase": phase,
@@ -130,13 +132,13 @@ class HeadlessAgentRunner:
             loop.add_signal_handler(sig, shutdown_handler, sig)
 
     # ============================================================
-    # Main run with bidirectional WebSocket
+    # Main run – now supports empty / None prompt
     # ============================================================
 
     async def run(
         self,
-        prompt: str,
-        system_prompt: str,
+        prompt: Optional[str] = None,          # ← changed: now optional
+        system_prompt: str = "",
         max_tokens: int = 12000,
     ) -> bool:
         if self._running:
@@ -162,7 +164,13 @@ class HeadlessAgentRunner:
                 self.pid_path.unlink(missing_ok=True)
 
         self._write_pid()
-        self._write_status("starting", prompt=prompt, force=True)
+        initial_mode = "listening (WS-driven)" if not prompt else "task"
+        self._write_status(
+            "starting",
+            prompt=prompt,
+            message=f"Starting in {initial_mode} mode",
+            force=True,
+        )
 
         # === Start bidirectional WebSocket bridge ===
         self._bridge = WebSocketBridge(
@@ -177,9 +185,10 @@ class HeadlessAgentRunner:
         current_phase = "idle"
 
         try:
-            # Use run(chat_mode=False) as you requested
+            # Use run(chat_mode=False) – Agent handles None/empty prompt cleanly
+            # (if prompt is falsy it skips initial post_message and enters queue listener)
             async for event_type, payload in self.agent.run(
-                user_prompt=prompt,
+                user_prompt=prompt,                    # ← now safely None/empty
                 system_prompt=system_prompt,
                 temperature=0.3,
                 max_tokens=max_tokens,
