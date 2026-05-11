@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Abyss-c0re", email = "dev@abyss-core.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.5",
     "beautifulsoup4>=4.14.3",
