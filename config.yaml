@@ -53,22 +53,13 @@ clients:
       - target: ask
         name: deep_think
         description: "Careful multi-step reasoning for complex problems"
-        tags: ["reasoning", "planning", "slow", "accurate"]
+        tags: ["reasoning", "planning"]
 
-      - target: chat
-        name: structured_reasoning
-        description: "Multi-turn structured reasoning conversation"
-        tags: ["reasoning", "chat", "analysis"]
 
-    # embeddings:
-    #   type: embeddings
-    #   model: embedding-gemma-300m
-    #   tokenizer: /home/user/Dev/AI/model/tokenizer.json
-
-    embeddings:
-      use_fastembed: true # ← set false to force original llama.cpp
-      fastembed_model: "BAAI/bge-small-en-v1.5"
-      fastembed_cache_dir: "~/.neuralcore/cache/fastembed"
+embeddings:
+  use_fastembed: true # ← set false to force original llama.cpp
+  fastembed_model: "BAAI/bge-small-en-v1.5"
+  fastembed_cache_dir: "~/.neuralcore/cache/fastembed"
 
 tools:
   FileEditingTools:
@@ -101,7 +92,6 @@ agents:
     description: "Main orchestrator agent - plans and deploys sub-agents for complex tasks"
     client: reasoning
     max_iterations: -1
-    max_reflections: 6
     temperature: 0.35
     max_tokens: 64000
     max_sub_agents: 8
@@ -119,7 +109,6 @@ agents:
     description: "Terminal assistant - starts in natural chat mode"
     client: main
     max_iterations: 100
-    max_reflections: 3
     temperature: 0.8
     max_tokens: 64000
     max_sub_agents: 5
@@ -139,7 +128,6 @@ agents:
     client: main
     is_sub_agent: true
     max_iterations: 12
-    max_reflections: 3
     temperature: 0.3
     max_tokens: 64000
     system_prompt: "You are a focused sub-agent helping the main Terminal Chat Agent."
