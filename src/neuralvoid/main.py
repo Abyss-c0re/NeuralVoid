@@ -13,6 +13,8 @@ from neuralcore.utils.config import get_loader
 from neuralcore.clients.factory import get_clients
 from neuralvoid.workflows.default_flow import AgentFlow
 
+# NEW: Agent loading now uses the factory (load_agent_from_config was removed)
+from neuralcore.agents.factory import AgentFactory
 
 from neuralcore.utils.logger import Logger
 
@@ -57,7 +59,16 @@ def main():
         # UI / Interactive mode default
         agent_id = "agent_002"
 
-    agent = loader.load_agent_from_config(agent_id)
+    # Updated agent loading (load_agent_from_config removed)
+    # Uses AgentFactory pattern from the integration test reference.
+    # No domain-specific tool loading added here – kept modular and client-side.
+    agent_config = loader.get_agent_config(agent_id)
+    factory = AgentFactory(loader)
+    agent = factory.create_agent(
+        agent_id=agent_id,
+        config=agent_config,
+        app_root=Path(__file__).parent,
+    )
     AgentFlow(agent)  # loading default workflows.
 
     # ── Headless mode ─────────────────────────────────────────────
@@ -74,7 +85,8 @@ def main():
         # Optional prompt support (None = task-ready / autonomous mode)
         prompt = args.deploy.strip() if args.deploy else None
 
-        agent_cfg = loader.get_agent_config(agent_id)
+        # Reuse pre-fetched agent_config (avoids redundant loader call)
+        agent_cfg = agent_config
 
         max_iterations = args.max_iterations or agent_cfg.get("max_iterations", 10)
         max_tokens = args.max_tokens or agent_cfg.get("max_tokens", 12000)
