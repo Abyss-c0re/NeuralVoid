@@ -23,10 +23,18 @@ if [ "$DEV_MODE" = true ]; then
   # Parent directory = NeuralCore root when inside client/ submodule
   PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 
-  # Check if parent is a NeuralCore project (void inside client folder)
+  # 1. Original: parent itself is NeuralCore (e.g. NeuralVoid inside NeuralCore/client layout)
   if [ -f "$PARENT_DIR/pyproject.toml" ] && [ -d "$PARENT_DIR/src/neuralcore" ]; then
     NEURALCORE_PATH="$PARENT_DIR"
     echo "✅ Detected NeuralCore project at parent (client submodule)"
+
+  # 2. NEW: sibling NeuralCore folder (common dev layout: ProjectNexus/NeuralCore + ProjectNexus/NeuralVoid)
+  elif [ -d "$PARENT_DIR/NeuralCore" ] && \
+       [ -f "$PARENT_DIR/NeuralCore/pyproject.toml" ] && \
+       [ -d "$PARENT_DIR/NeuralCore/src/neuralcore" ]; then
+    NEURALCORE_PATH="$PARENT_DIR/NeuralCore"
+    echo "✅ Detected sibling NeuralCore project at $NEURALCORE_PATH"
+
   else
     echo "ℹ️  Not inside NeuralCore client. Cloning using pyproject.toml link..."
     # Extract exact git URL from our own pyproject.toml
