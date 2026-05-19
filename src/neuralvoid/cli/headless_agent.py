@@ -33,12 +33,16 @@ class HeadlessAgentRunner:
         pid_file: str | Path = "/tmp/agent.pid",
         websocket_port: int = 8765,
         status_update_throttle_sec: float = 1.0,
+        # [NEW] When True the runner skips creating its own WebSocketBridge.
+        # Used by AgentHub which manages bridges externally.
+        skip_bridge: bool = False,
     ):
         self.agent = agent
         self.status_path = Path(status_file).resolve()
         self.pid_path = Path(pid_file).resolve()
         self.websocket_port = websocket_port
         self.throttle_sec = status_update_throttle_sec
+        self._skip_bridge = skip_bridge
 
         self._last_status_write: float = 0.0
         self._running = False
@@ -173,13 +177,16 @@ class HeadlessAgentRunner:
         )
 
         # === Start bidirectional WebSocket bridge ===
-        self._bridge = WebSocketBridge(
-            agent=self.agent,
-            host="127.0.0.1",
-            port=self.websocket_port,
-        )
-        if self._bridge:
-            self._bridge_task = asyncio.create_task(self._bridge.start())
+        # [UPDATED] Skip bridge creation when running under AgentHub — the
+        # Hub manages bridges externally via hub.register_agent().
+        if not self._skip_bridge:
+            self._bridge = WebSocketBridge(
+                agent=self.agent,
+                host="127.0.0.1",
+                port=self.websocket_port,
+            )
+            if self._bridge:
+                self._bridge_task = asyncio.create_task(self._bridge.start())
 
         current_iteration = 0
         current_phase = "idle"
@@ -288,6 +295,22 @@ class HeadlessAgentRunner:
 
                 elif event_type == "reflection_triggered":
                     print("\n🤔 Reflection:\n", str(payload).strip())
+
+                # [FIX] Handle llm_response events from chat_tool_loop.
+                # In casual/chat mode the workflow yields "llm_response" with
+                # the full reply — previously this was silently ignored, so
+                # nothing printed to the terminal when a WS message arrived.
+                elif event_type == "llm_response":
+                    reply = payload.get("full_reply", "") if isinstance(payload, dict) else str(payload)
+                    if reply:
+                        print(f"\n💬 Agent reply:\n{reply}")
+                    self._write_status(
+                        "running",
+                        prompt=prompt,
+                        iteration=current_iteration,
+                        phase=current_phase,
+                        message="LLM response received",
+                    )
 
                 elif event_type == "final_summary":
                     print("\n📊 FINAL REPORT\n", str(payload).strip())

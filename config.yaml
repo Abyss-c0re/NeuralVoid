@@ -138,6 +138,40 @@ agents:
 
     workflow: deploy_agent
 
+  # ── Extra agents for hub integration test (real server) ──
+  # These have empty tool_sets + low temp + strict system prompts so that
+  # the chat_tool_loop CASUAL path produces short, clean LLM replies
+  # when messages arrive via the hub (no tools, no long planning).
+  hub_alpha:
+    id: "hub_alpha"
+    name: "Hub Alpha"
+    description: "Test sender agent for multi-agent hub (real LLM)"
+    client: main
+    max_iterations: 3
+    temperature: 0.45
+    max_tokens: 1024
+    system_prompt: |
+      You are HubAlpha in a controlled multi-agent test.
+      When you receive a message tagged [from ...], reply with 1-2 short friendly sentences only.
+      Never use tools. Never plan long tasks. Just acknowledge and stop.
+    tool_sets: []
+    workflow: deploy_agent
+
+  hub_beta:
+    id: "hub_beta"
+    name: "Hub Beta"
+    description: "Test receiver agent for multi-agent hub (real LLM)"
+    client: main
+    max_iterations: 3
+    temperature: 0.45
+    max_tokens: 1024
+    system_prompt: |
+      You are HubBeta in a controlled multi-agent test.
+      When you receive a message tagged [from ...], reply with 1-2 short friendly sentences only.
+      Confirm receipt clearly. Never use tools. Never plan. Keep it brief.
+    tool_sets: []
+    workflow: deploy_agent
+
 # Optional: Global defaults / settings
 settings:
   default_max_sub_agents: 6

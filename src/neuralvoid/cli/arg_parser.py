@@ -66,6 +66,30 @@ class CLIParser:
             help="Specify which agent to deploy (default: the default agent in config).",
         )
 
+        # [NEW] Multi-agent deployment support.
+        # Accepts a comma-separated list of agent IDs.  When provided the Hub
+        # is started automatically and agents communicate via WebSocket.
+        deploy_group.add_argument(
+            "--agents",
+            type=str,
+            default=None,
+            metavar="ID1,ID2,...",
+            help=(
+                "Deploy multiple agents (comma-separated IDs).\n"
+                "A central AgentHub is started automatically so agents\n"
+                "can communicate with each other over WebSocket.\n"
+                '  Example: --agents "agent_alpha,agent_beta"'
+            ),
+        )
+
+        deploy_group.add_argument(
+            "--hub-port",
+            type=int,
+            default=8770,
+            metavar="PORT",
+            help="Port for the AgentHub WebSocket server (default: %(default)s)",
+        )
+
         deploy_group.add_argument(
             "--status-file",
             type=self._json_file_path,

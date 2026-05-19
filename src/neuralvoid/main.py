@@ -73,6 +73,61 @@ def main():
 
     # ── Headless mode ─────────────────────────────────────────────
     if args.deploy is not None:
+
+        # Optional prompt support (None = task-ready / autonomous mode)
+        prompt = args.deploy.strip() if args.deploy else None
+
+        # ────────────────────────────────────────────────────────
+        # [NEW] Multi-agent deployment via AgentHub
+        # When --agents "id1,id2" is supplied, we spin up the Hub,
+        # register every requested agent, and deploy them in parallel
+        # with full WebSocket inter-agent communication.
+        # ────────────────────────────────────────────────────────
+        if getattr(args, "agents", None):
+            from neuralvoid.hub import AgentHub
+
+            agent_ids = [aid.strip() for aid in args.agents.split(",") if aid.strip()]
+            hub_port = getattr(args, "hub_port", 8770)
+
+            hub = AgentHub(host="127.0.0.1", hub_port=hub_port)
+
+            for aid in agent_ids:
+                a_cfg = loader.get_agent_config(aid)
+                if not a_cfg:
+                    print(f"[ERROR] Agent '{aid}' not found in config — skipping")
+                    continue
+                a = factory.create_agent(
+                    agent_id=aid,
+                    config=a_cfg,
+                    app_root=Path(__file__).parent,
+                )
+                AgentFlow(a)        # register default workflows
+                hub.register_agent(a)
+
+            if not hub.agents:
+                print("[ERROR] No valid agents to deploy")
+                sys.exit(1)
+
+            max_tokens = args.max_tokens or 12000
+
+            print(f"\n   Multi-agent deploy: {list(hub.agents.keys())}")
+            print(f"   Hub port     : {hub_port}")
+            print(f"   Prompt       : {prompt or '<none - listening mode>'}")
+            print("-" * 60)
+
+            results = asyncio.run(
+                hub.deploy_all(
+                    prompt=prompt,
+                    system_prompt=loader.get_system_prompt(),
+                    max_tokens=max_tokens,
+                )
+            )
+            # Exit 0 only if every agent succeeded
+            sys.exit(0 if all(results.values()) else 1)
+
+        # ────────────────────────────────────────────────────────
+        # Single-agent deployment (original path, unchanged)
+        # ────────────────────────────────────────────────────────
         from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
         runner = HeadlessAgentRunner(
@@ -81,9 +136,6 @@ def main():
             pid_file=args.pid_file,
             status_update_throttle_sec=args.throttle_sec,
         )
-
-        # Optional prompt support (None = task-ready / autonomous mode)
-        prompt = args.deploy.strip() if args.deploy else None
 
         # Reuse pre-fetched agent_config (avoids redundant loader call)
         agent_cfg = agent_config
