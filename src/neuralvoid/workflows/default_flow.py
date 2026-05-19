@@ -126,7 +126,7 @@ async def chat_tool_loop(agent, state: AgentState):
             await agent.add_message("assistant", final_reply)
             yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
 
-            agent.message_queue.task_done()
+            # task_done now performed inside wait_for_incoming_message (single source of truth)
             state.reset_for_new_task()
 
             state.request_loop_restart(
