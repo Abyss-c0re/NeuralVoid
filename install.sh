@@ -1,14 +1,16 @@
 #!/bin/bash
 # NeuralVoid - Installation script
-# Supports standard install, --dev (parent siblings) and --bundle (self-contained ./client + ./hub subfolders)
-# --bundle avoids polluting parent dir with Core/Hub clones; everything lives inside NeuralVoid/ for portable editable dev
+# Supports standard install, --dev (parent siblings) and --bundle (self-contained ./core + ./hub subfolders)
+# --bundle avoids polluting parent dir with Core/Hub clones; everything lives inside NeuralVoid/ (the client) for portable editable dev
+#   - core/  = NeuralCore (editable)
+#   - hub/   = NeuralHub (editable)
 # Client-side only, modular, reusable - no framework domain logic
 
 set -euo pipefail
 
 echo "=== NeuralVoid Installation ==="
 
-# Parse arguments: support --dev (parent siblings) and --bundle (self-contained client/hub subfolders)
+# Parse arguments: support --dev (parent siblings) and --bundle (self-contained core/hub subfolders inside NeuralVoid)
 DEV_MODE=false
 BUNDLE_MODE=false
 for arg in "$@"; do
@@ -24,7 +26,7 @@ cd "$SCRIPT_DIR"
 
 if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
   if [ "$BUNDLE_MODE" = true ]; then
-    echo "📦 Bundle mode activated — self-contained editable NeuralCore (./client) + NeuralHub (./hub)..."
+    echo "📦 Bundle mode activated — self-contained editable NeuralCore (./core) + NeuralHub (./hub)..."
   else
     echo "🚀 Dev mode activated — linking editable NeuralCore + NeuralHub from parent..."
   fi
@@ -35,7 +37,7 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
   # Determine target base and folder names based on mode
   if [ "$BUNDLE_MODE" = true ]; then
     TARGET_BASE="$SCRIPT_DIR"
-    CORE_DIR_NAME="client"
+    CORE_DIR_NAME="core"
     HUB_DIR_NAME="hub"
   else
     TARGET_BASE="$PARENT_DIR"
@@ -71,13 +73,13 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
     NEURALHUB_PATH="$CLONE_DIR"
   fi
 
-  # For bundle mode, patch the cloned hub's pyproject so its neuralcore source points to ../client instead of ../NeuralCore
+  # For bundle mode, patch the cloned hub's pyproject so its neuralcore source points to ../core instead of ../NeuralCore
   if [ "$BUNDLE_MODE" = true ]; then
     HUB_PYPROJECT="$NEURALHUB_PATH/pyproject.toml"
     if [ -f "$HUB_PYPROJECT" ]; then
-      echo "🔧 Patching NeuralHub pyproject.toml for bundle (neuralcore path -> ../client)..."
-      sed -i 's|path = "../NeuralCore"|path = "../client"|' "$HUB_PYPROJECT" 2>/dev/null || true
-      sed -i 's|extraPaths = \["../NeuralCore"\]|extraPaths = ["../client"]|' "$HUB_PYPROJECT" 2>/dev/null || true
+      echo "🔧 Patching NeuralHub pyproject.toml for bundle (neuralcore path -> ../core)..."
+      sed -i 's|path = "../NeuralCore"|path = "../core"|' "$HUB_PYPROJECT" 2>/dev/null || true
+      sed -i 's|extraPaths = \["../NeuralCore"\]|extraPaths = ["../core"]|' "$HUB_PYPROJECT" 2>/dev/null || true
     fi
   fi
 
@@ -120,8 +122,8 @@ uv tool install -e .
 echo ""
 echo "✅ NeuralVoid installation completed successfully!"
 if [ "$BUNDLE_MODE" = true ]; then
-  echo "📦 Bundle mode active — NeuralCore in ./client/ and NeuralHub in ./hub/ (editable, self-contained)."
-  echo "   Edits inside client/ and hub/ will be live immediately. No parent-dir traces."
+  echo "📦 Bundle mode active — NeuralCore in ./core/ and NeuralHub in ./hub/ (editable, self-contained)."
+  echo "   Edits inside core/ and hub/ will be live immediately. No parent-dir traces."
 elif [ "$DEV_MODE" = true ]; then
   echo "🔧 Dev mode active — edits to NeuralCore and NeuralHub will be live immediately."
 fi
