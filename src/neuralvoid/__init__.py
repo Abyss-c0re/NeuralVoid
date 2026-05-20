@@ -13,7 +13,7 @@ except PackageNotFoundError:
     __version__ = "0.1.0"
 
 # High-level public API
-from .hub.hub import AgentHub
+from neuralhub import AgentHub
 from .ui.chat import LLMChatApp
 from .cli.arg_parser import CLIParser
 

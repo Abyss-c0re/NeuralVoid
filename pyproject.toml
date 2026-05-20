@@ -12,6 +12,7 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "ddgs>=9.14.4",
     "neuralcore @ git+https://github.com/Abyss-c0re/NeuralCore.git",
+    "neuralhub @ git+https://github.com/Abyss-c0re/NeuralHub.git",
     "textual>=8.2.7",
     "tree-sitter>=0.25.2",
     "tree-sitter-c>=0.24.2",

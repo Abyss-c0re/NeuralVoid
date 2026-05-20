@@ -77,7 +77,7 @@ def main():
         # with full WebSocket inter-agent communication.
         # ────────────────────────────────────────────────────────
         if getattr(args, "agents", None):
-            from neuralvoid.hub import AgentHub
+            from neuralhub import AgentHub
 
             agent_ids = [aid.strip() for aid in args.agents.split(",") if aid.strip()]
             hub_port = getattr(args, "hub_port", 8770)
