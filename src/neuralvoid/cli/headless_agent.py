@@ -9,18 +9,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from neuralcore import Agent, WebSocketBridge, Logger
+from neuralcore import Agent, Logger
+
+# The canonical implementation lives in NeuralHub.
+# We inherit the core execution loop, bridge lifecycle, and cancellation
+# handling, then layer rich CLI output, signals, and status on top.
+from neuralhub.runners.headless_runner import (
+    HeadlessAgentRunner as _BaseHeadlessAgentRunner,
+)
 
 logger = Logger.get_logger()
 
 
-class HeadlessAgentRunner:
+class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
     """
-    Headless runner with bidirectional WebSocket support.
-    Supports both:
-      - Traditional mode with initial prompt
-      - Pure listening mode (prompt=None/empty) → waits for WS "send"/"control" messages
-    Uses agent.run(chat_mode=False) and keeps AgentState as the single source of truth.
+    Rich, human-facing headless runner used by the `neuralvoid` CLI.
+
+    Inherits from the canonical :class:`neuralhub.runners.headless_runner.HeadlessAgentRunner`
+    and reuses the shared driver (`_iter_agent_events`), while providing a much
+    richer experience:
+
+      - Live terminal output for every workflow event (phase, tools, deltas, LLM replies, …)
+      - Detailed throttled status files
+      - SIGINT/SIGTERM handlers with cooperative shutdown
+      - Stale PID guard + single-instance protection
+      - Graceful bridge shutdown via ``_stop_bridge`` override
+      - Final status banner + file cleanup
     """
 
     def __init__(
@@ -30,25 +44,27 @@ class HeadlessAgentRunner:
         pid_file: str | Path = "/tmp/agent.pid",
         websocket_port: int = 8765,
         status_update_throttle_sec: float = 1.0,
-        # [NEW] When True the runner skips creating its own WebSocketBridge.
+        # When True the runner skips creating its own WebSocketBridge.
         # Used by AgentHub which manages bridges externally.
         skip_bridge: bool = False,
     ):
-        self.agent = agent
-        self.status_path = Path(status_file).resolve()
-        self.pid_path = Path(pid_file).resolve()
-        self.websocket_port = websocket_port
-        self.throttle_sec = status_update_throttle_sec
-        self._skip_bridge = skip_bridge
+        # Delegate to the canonical implementation in NeuralHub.
+        # Passing the explicit status/pid paths preserves the historical
+        # defaults and any overrides coming from the CLI argument parser.
+        super().__init__(
+            agent=agent,
+            status_file=status_file,
+            pid_file=pid_file,
+            websocket_port=websocket_port,
+            status_update_throttle_sec=status_update_throttle_sec,
+            skip_bridge=skip_bridge,
+            # Explicit paths take precedence; do not inject an app_root here.
+            app_root=None,
+        )
 
-        self._last_status_write: float = 0.0
-        self._running = False
-        self._success = False
-        self._start_time: Optional[datetime] = None
-
-        self._stop_event: Optional[asyncio.Event] = None
-        self._bridge: Optional[WebSocketBridge] = None
-        self._bridge_task: Optional[asyncio.Task] = None
+        # The base class already initializes all core state
+        # (_running, _success, _start_time, _last_status_write, paths, etc.).
+        # Nothing else needs to be done here for the rich subclass.
 
     # ============================================================
     # Status / PID
@@ -108,6 +124,11 @@ class HeadlessAgentRunner:
                     p.unlink()
             except Exception:
                 pass
+
+    async def _stop_bridge(self) -> None:
+        """Graceful shutdown for the rich CLI experience."""
+        if self._bridge:
+            await self._bridge.stop()
 
     # ============================================================
     # Signals
@@ -173,31 +194,17 @@ class HeadlessAgentRunner:
             force=True,
         )
 
-        # === Start bidirectional WebSocket bridge ===
-        # [UPDATED] Skip bridge creation when running under AgentHub — the
-        # Hub manages bridges externally via hub.register_agent().
-        if not self._skip_bridge:
-            self._bridge = WebSocketBridge(
-                agent=self.agent,
-                host="127.0.0.1",
-                port=self.websocket_port,
-            )
-            if self._bridge:
-                self._bridge_task = asyncio.create_task(self._bridge.start())
-
         current_iteration = 0
         current_phase = "idle"
 
         try:
-            # Use run(chat_mode=False) – Agent handles None/empty prompt cleanly
-            # (if prompt is falsy it skips initial post_message and enters queue listener)
-            async for event_type, payload in self.agent.run(
-                user_prompt=prompt,                    # ← now safely None/empty
+            # Use the shared driver from the NeuralHub base class.
+            # This eliminates duplication of bridge + agent.run() + stop_event wiring.
+            async for event_type, payload in self._iter_agent_events(
+                prompt=prompt,
                 system_prompt=system_prompt,
-                temperature=0.3,
                 max_tokens=max_tokens,
-                chat_mode=False,
-                stop_event=self._stop_event,
+                temperature=0.3,     # preserve the historical rich-CLI temperature
             ):
                 if self._stop_event.is_set():
                     print("\n🛑 Stop event received")
@@ -359,13 +366,8 @@ class HeadlessAgentRunner:
         finally:
             self._running = False
 
-            # Gracefully stop WebSocket bridge
-            if self._bridge:
-                await self._bridge.stop()
-            if self._bridge_task and not self._bridge_task.done():
-                self._bridge_task.cancel()
-
-            # Final status
+            # Final status + cleanup (bridge shutdown is handled by the
+            # shared _iter_agent_events + our _stop_bridge override)
             if self._success:
                 self._write_status("success", force=True)
             else:
