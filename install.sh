@@ -107,13 +107,18 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
     DO_PATCH_HUB=false
   fi
 
-  # Patch only the internal bundle copy (the one whose relative path must be ../core)
+  # Patch only the internal bundle copy.
+  # We change its dependency declaration to use the workspace form so that
+  # uv is happy when the root already registered `core` as a workspace member.
   if [ "$DO_PATCH_HUB" = true ]; then
     HUB_PYPROJECT="$NEURALHUB_PATH/pyproject.toml"
     if [ -f "$HUB_PYPROJECT" ]; then
-      echo "🔧 Patching NeuralHub pyproject.toml for bundle (neuralcore path -> ../core)..."
-      sed -i 's|path = "../NeuralCore"|path = "../core"|' "$HUB_PYPROJECT" 2>/dev/null || true
+      echo "🔧 Patching NeuralHub pyproject.toml for bundle (using workspace = true for neuralcore)..."
+      # Force the workspace form right after clone/detect (uv is strict about this once the root declares a workspace)
+      sed -i '/^\s*neuralcore\s*=/c\neuralcore = { workspace = true }' "$HUB_PYPROJECT" 2>/dev/null || true
+      # Keep pyright happy (it still benefits from a concrete path)
       sed -i 's|extraPaths = \["../NeuralCore"\]|extraPaths = ["../core"]|' "$HUB_PYPROJECT" 2>/dev/null || true
+      sed -i 's|extraPaths = \["../core"\]|extraPaths = ["../core"]|' "$HUB_PYPROJECT" 2>/dev/null || true
     fi
   fi
 
@@ -174,6 +179,110 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
   # ──────────────────────────────────────────────────────────────
   echo "🔗 Adding local NeuralCore..."
   uv add --editable "$NEURALCORE_PATH"
+
+  # When using local ./core + ./hub copies, make sure *inside the hub package itself*
+  # the dependency on neuralcore is properly switched from the git version to the
+  # local editable one. Manual toml patching often leaves the `dependencies = [...]`
+  # list still pointing at the git URL. The only reliable way is to let `uv` itself
+  # rewrite hub's pyproject.toml and lockfile.
+  if [ "$BUNDLE_MODE" = true ] && [ "$DO_PATCH_HUB" = true ]; then
+    echo "🔧 Fixing NeuralHub's own dependency on NeuralCore (uv remove + uv add --editable from inside hub)..."
+    (
+      cd "$SCRIPT_DIR/hub"
+      uv remove neuralcore 2>/dev/null || true
+      uv add --editable ../core
+    )
+    echo "✅ NeuralHub now correctly depends on the local ./core"
+
+    # The `uv add` above writes a path-based entry. We must switch it to the
+    # workspace form so it doesn't conflict with the root's [tool.uv.workspace] declaration.
+    HUB_PYPROJECT="$SCRIPT_DIR/hub/pyproject.toml"
+    if [ -f "$HUB_PYPROJECT" ]; then
+      echo "🔧 Normalizing NeuralHub's sources to use { workspace = true }..."
+      sed -i '/^\s*neuralcore\s*=/c\neuralcore = { workspace = true }' "$HUB_PYPROJECT" 2>/dev/null || true
+    fi
+  fi
+
+  # Prepare the root pyproject.toml for a proper uv workspace when using local copies.
+  # We declare the two packages via [tool.uv.workspace] members (the modern/recommended way).
+  if [ "$BUNDLE_MODE" = true ] && [ "$DO_PATCH_HUB" = true ]; then
+    echo "🔧 Preparing root pyproject.toml as a workspace (members + sources)..."
+    python3 - <<'PYEOF' "$SCRIPT_DIR/pyproject.toml"
+import re
+import sys
+
+p = sys.argv[1]
+with open(p, 'r', encoding='utf-8') as f:
+    txt = f.read()
+
+# Pre-clean any old path-based declarations for our workspace members
+# (uv really dislikes seeing `neuralcore = { path = ... }` once members are declared)
+txt = re.sub(r'^\s*neuralcore\s*=.*path.*$', 'neuralcore = { workspace = true }', txt, flags=re.MULTILINE)
+txt = re.sub(r'^\s*neuralhub\s*=.*path.*$',  'neuralhub  = { workspace = true }', txt, flags=re.MULTILINE)
+
+# --- 1. Ensure [tool.uv.workspace] members = ["core", "hub"] ---
+workspace_block = '[tool.uv.workspace]\nmembers = ["core", "hub"]\n'
+
+if "[tool.uv.workspace]" not in txt:
+    if not txt.endswith("\n"):
+        txt += "\n"
+    txt += "\n" + workspace_block
+else:
+    if 'members = ["core", "hub"]' not in txt:
+        # Try to inject or fix the members line
+        txt = re.sub(
+            r'(\[tool\.uv\.workspace\][^\[]*)',
+            r'\1members = ["core", "hub"]\n',
+            txt, flags=re.DOTALL
+        )
+
+# --- 2. Ensure [tool.uv.sources] declares the workspace members using the
+#     `workspace = true` form (required once [tool.uv.workspace] members are declared).
+#     Using a direct path here is what triggers the exact error the user is seeing.
+desired_sources = {
+    "neuralcore": 'neuralcore = { workspace = true }',
+    "neuralhub":  'neuralhub  = { workspace = true }',
+}
+
+if "[tool.uv.sources]" not in txt:
+    if not txt.endswith("\n"):
+        txt += "\n"
+    txt += "\n[tool.uv.sources]\n" + "\n".join(desired_sources.values()) + "\n"
+else:
+    lines = txt.splitlines(keepends=True)
+    out = []
+    in_src = False
+    seen = {"neuralcore": False, "neuralhub": False}
+    for ln in lines:
+        if ln.strip().startswith("[") and "[tool.uv.sources]" not in ln:
+            if in_src:
+                for k, v in desired_sources.items():
+                    if not seen[k]:
+                        out.append(v + "\n")
+            in_src = False
+        if "[tool.uv.sources]" in ln:
+            in_src = True
+            out.append(ln)
+            continue
+        if in_src:
+            m = re.match(r'\s*(neuralcore|neuralhub)\s*=', ln)
+            if m:
+                k = m.group(1)
+                out.append(desired_sources[k] + "\n")
+                seen[k] = True
+                continue
+        out.append(ln)
+    if in_src:
+        for k, v in desired_sources.items():
+            if not seen[k]:
+                out.append(v + "\n")
+    txt = "".join(out)
+
+with open(p, 'w', encoding='utf-8') as f:
+    f.write(txt)
+print("Root workspace + sources prepared for core/hub.")
+PYEOF
+  fi
 
   echo "🔗 Adding local NeuralHub (this brings its own local neuralcore source)..."
   uv add --editable "$NEURALHUB_PATH"
