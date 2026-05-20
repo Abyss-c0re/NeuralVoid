@@ -165,15 +165,18 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
   fi
 
   # ──────────────────────────────────────────────────────────────
-  # Now both locations exist on disk → safe to add them.
-  # Adding NeuralHub first is still fine; its dependency on neuralcore
-  # will resolve via the [tool.uv.sources] entry that now points to a real dir.
+  # Add the packages as editable workspace members.
+  # We deliberately add NeuralCore *first* (the leaf), then NeuralHub.
+  # Adding the dependent (hub) first can cause uv workspace resolution
+  # errors because hub's [tool.uv.sources] references neuralcore before
+  # neuralcore itself has been registered as a workspace source.
+  # Core-first order makes both registrations clean.
   # ──────────────────────────────────────────────────────────────
-  echo "🔗 Adding local NeuralHub (this brings its own local neuralcore source)..."
-  uv add --editable "$NEURALHUB_PATH"
-
   echo "🔗 Adding local NeuralCore..."
   uv add --editable "$NEURALCORE_PATH"
+
+  echo "🔗 Adding local NeuralHub (this brings its own local neuralcore source)..."
+  uv add --editable "$NEURALHUB_PATH"
 fi
 
 # Standard Void installation (exactly as in README)
