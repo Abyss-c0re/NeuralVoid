@@ -8,15 +8,8 @@ from neuralvoid.ui.chat import LLMChatApp
 
 from neuralvoid.ui.rendering import get_renderer
 
-from neuralcore.utils.config import get_loader
-
-from neuralcore.clients.factory import get_clients
+from neuralcore import get_loader, get_clients, AgentFactory, Logger
 from neuralvoid.workflows.default_flow import AgentFlow
-
-# NEW: Agent loading now uses the factory (load_agent_from_config was removed)
-from neuralcore.agents.factory import AgentFactory
-
-from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger(renderer=get_renderer())
 

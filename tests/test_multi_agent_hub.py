@@ -32,11 +32,9 @@ import time
 from pathlib import Path
 
 # ── Framework imports ──
+from neuralcore import ConfigLoader, AgentFactory, get_client_factory
 import neuralcore.utils.config as config_module
 import neuralcore.clients.factory as cfactory_module
-from neuralcore.utils.config import ConfigLoader
-from neuralcore.agents.factory import AgentFactory
-from neuralcore.clients.factory import ClientFactory
 
 # ── Client imports ──
 from neuralvoid.workflows.default_flow import AgentFlow

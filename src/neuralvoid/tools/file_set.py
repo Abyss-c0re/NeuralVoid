@@ -3,11 +3,8 @@ import asyncio
 import aiofiles
 
 from typing import AsyncIterable, List
-from neuralcore.actions.registry import tool, sequenced
-
+from neuralcore import tool, sequenced, Logger
 from neuralcore.utils.file_helpers import _read_file, _collect_text_files
-
-from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
 

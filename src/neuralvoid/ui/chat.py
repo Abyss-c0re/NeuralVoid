@@ -9,14 +9,10 @@ from textual.binding import Binding
 from textual.message import Message as TextualMessage
 from textual.events import Key
 
-from neuralcore.agents.core import Agent
-from neuralcore.actions.registry import registry
-from neuralcore.utils.prompt_builder import PromptBuilder
-
+from neuralcore import Agent, registry, PromptBuilder, Logger
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
 from neuralvoid.ui.helpers import _build_tool_markdown
-from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
 

@@ -1,4 +1,4 @@
-from neuralcore.actions.registry import tool
+from neuralcore import tool
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup

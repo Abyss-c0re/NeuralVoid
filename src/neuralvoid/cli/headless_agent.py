@@ -9,10 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from neuralcore.agents.core import Agent
-from neuralcore.bridge.websocket import WebSocketBridge
-
-from neuralcore.utils.logger import Logger
+from neuralcore import Agent, WebSocketBridge, Logger
 
 logger = Logger.get_logger()
 

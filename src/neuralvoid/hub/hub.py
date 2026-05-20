@@ -29,9 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from websockets.asyncio.server import ServerConnection, serve
 
-from neuralcore.agents.core import Agent
-from neuralcore.bridge.websocket import WebSocketBridge
-from neuralcore.utils.logger import Logger
+from neuralcore import Agent, WebSocketBridge, Logger
 
 logger = Logger.get_logger()
 

@@ -1,4 +1,4 @@
-from neuralcore.actions.registry import tool
+from neuralcore import tool
 from neuralcore.utils.os_info import get_os_info
 from pathlib import Path
 from typing import Optional, List, Any

@@ -1,9 +1,7 @@
 """
-AgentHub package for multi-agent WebSocket coordination.
+NeuralVoid Hub
 
-Re-exports the main AgentHub class so that
-    from neuralvoid.hub import AgentHub
-continues to work after the hub module was turned into a package.
+Multi-agent coordination via WebSocket (AgentHub + per-agent bridges).
 """
 
 from .hub import AgentHub
