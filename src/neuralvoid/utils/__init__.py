@@ -1,7 +1,9 @@
 """
 NeuralVoid Utilities
 
-Shared helpers (currently minimal).
+Shared helpers.
 """
 
-__all__ = []
+from .app_root import find_app_root
+
+__all__ = ["find_app_root"]

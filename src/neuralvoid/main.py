@@ -6,12 +6,10 @@ from pathlib import Path
 from neuralvoid.cli.arg_parser import CLIParser
 from neuralvoid.ui.chat import LLMChatApp
 
-from neuralvoid.ui.rendering import get_renderer
+from neuralvoid.utils import find_app_root
 
-from neuralcore import get_loader, get_clients, AgentFactory, Logger
+from neuralcore import ConfigLoader, get_clients, AgentFactory
 from neuralvoid.workflows.default_flow import AgentFlow
-
-logger = Logger.get_logger(renderer=get_renderer())
 
 
 def main():
@@ -25,8 +23,8 @@ def main():
             Path.home() / ".neuralcore" / "config.yaml"
         )
 
-    # ───────────────────────────── CONFIG ──────────────────────────
-    loader = get_loader(cli_path=args.config, app_root=Path(__file__).parent)
+    app_root = find_app_root()
+    loader = ConfigLoader(cli_path=args.config, app_root=app_root)
 
     system_prompt = loader.get_system_prompt()
 
@@ -60,13 +58,12 @@ def main():
     agent = factory.create_agent(
         agent_id=agent_id,
         config=agent_config,
-        app_root=Path(__file__).parent,
+        app_root=app_root,
     )
     AgentFlow(agent)  # loading default workflows.
 
     # ── Headless mode ─────────────────────────────────────────────
     if args.deploy is not None:
-
         # Optional prompt support (None = task-ready / autonomous mode)
         prompt = args.deploy.strip() if args.deploy else None
 
@@ -92,9 +89,9 @@ def main():
                 a = factory.create_agent(
                     agent_id=aid,
                     config=a_cfg,
-                    app_root=Path(__file__).parent,
+                    app_root=app_root,
                 )
-                AgentFlow(a)        # register default workflows
+                AgentFlow(a)  # register default workflows
                 hub.register_agent(a)
 
             if not hub.agents:
