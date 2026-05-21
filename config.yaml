@@ -1,9 +1,9 @@
 clients:
   main:
     type: chat
-    base_url: http://localhost:1212/v1
+    base_url: TEST
     model: qwen3.5-9b
-    tokenizer: /home/user/Dev/AI/model/tokenizer.json
+    tokenizer: /testbed/zed-base/core/data/tokenizer/tokenizer.json
     api_key_env: LLM_API_KEY
 
     # generation tuning
@@ -32,8 +32,9 @@ clients:
 
   reasoning:
     type: chat
+    base_url: TEST
     model: qwen3.5-9b
-    tokenizer: /home/user/Dev/AI/model/tokenizer.json
+    tokenizer: /testbed/zed-base/core/data/tokenizer/tokenizer.json
 
     # reasoning tuning
     presence_penalty: 1.2
@@ -59,7 +60,7 @@ clients:
 embeddings:
   use_fastembed: true # ← set false to force original llama.cpp
   fastembed_model: "BAAI/bge-small-en-v1.5"
-  fastembed_cache_dir: "~/.neuralcore/cache/fastembed"
+  fastembed_cache_dir: "/testbed/zed-base/core/data/cache/fastembed"
 
 tools:
   FileEditingTools:
@@ -185,9 +186,9 @@ app:
   log_level: debug
   log_to_file: true
   log_to_ui: false
-  log_file: ~/.neuralcore/neuralvoid.log
+  log_file: /testbed/zed-base/core/data/neuralvoid.log
   tool_info_level: compact
-  models_dir: ~/.neuralcore/models
+  models_dir: /testbed/zed-base/core/data/models
   cognition:
     reranker_enabled: true
     novelty_threshold: 0.82
@@ -197,7 +198,7 @@ app:
     recency_decay_lambda: 0.06
   knowledge_base:
     enabled: true
-    base_folder: "~/.neuralcore/kb" # Root folder for all indexed data
+    base_folder: "/testbed/zed-base/core/data/kb" # Root folder for all indexed data
     auto_reindex: true # Automatically watch for file changes
     reindex_interval_seconds: 300
     default_retrieve_k: 100

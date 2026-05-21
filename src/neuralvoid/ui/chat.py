@@ -235,7 +235,13 @@ class LLMChatApp(App):
         self.query_one("#input").focus()
 
     async def on_unmount(self):
-        logger.info("Shutting down logger")
+        logger.info("Shutting down agent and logger")
+
+        try:
+            if hasattr(self, "agent") and self.agent:
+                await self.agent.shutdown()
+        except Exception as e:
+            logger.warning(f"Error during agent shutdown on unmount: {e}")
 
         await Logger.shutdown()
 
@@ -534,7 +540,12 @@ class LLMChatApp(App):
 
         if cmd == "exit":
             self.chat.add(ChatMessage("system", "👋 Exiting..."))
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
+            try:
+                if hasattr(self, "agent") and self.agent:
+                    await self.agent.shutdown()
+            except Exception as e:
+                logger.warning(f"Error during agent shutdown on exit command: {e}")
             self.exit()
             return
 

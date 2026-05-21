@@ -67,6 +67,14 @@ neuralvoid --deploy "Analyze logs and summarize issues" \
 └── uv.lock                      # UV package lock file
 ```
 
+## AI Agent Testing Guide
+
+For AI coding agents (Grok, Claude, Cursor, etc.) performing realistic end-to-end testing — especially in `--deploy` mode with WebSocket-driven user input, BackgroundManager verification, and shutdown behavior — see:
+
+- [agent.md](agent.md)
+
+This guide explains how to launch agents headlessly, interact via the WebSocket bridge, monitor logs, exercise the internal workload manager, and validate clean shutdown paths.
+
 ## How It Works
 
 1. **Configuration Loading** – Agents, clients, workflows, and tools are defined in `config.yaml`.

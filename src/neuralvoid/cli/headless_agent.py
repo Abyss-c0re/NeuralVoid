@@ -366,6 +366,13 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
         finally:
             self._running = False
 
+            # Full agent shutdown (BackgroundManager + all internal jobs like KB watcher, training, etc.)
+            # This is critical so that Ctrl+C on the user app actually stops background work.
+            try:
+                await self.agent.shutdown()
+            except Exception as e:
+                logger.warning(f"Error during agent.shutdown() in headless runner: {e}")
+
             # Final status + cleanup (bridge shutdown is handled by the
             # shared _iter_agent_events + our _stop_bridge override)
             if self._success:
@@ -388,4 +395,4 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
             print(f"STATUS: {'SUCCESS' if self._success else 'FAILED'}")
             print("=" * 60)
 
-            return self._success
+            return self._success  # type: ignore  # return in finally is intentional here for the runner pattern

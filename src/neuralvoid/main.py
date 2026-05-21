@@ -1,5 +1,7 @@
 import os
 import sys
+import signal
+import atexit
 import asyncio
 from pathlib import Path
 
@@ -12,7 +14,37 @@ from neuralcore import ConfigLoader, get_clients, AgentFactory
 from neuralvoid.workflows.default_flow import AgentFlow
 
 
+_active_agents: list = []
+
+
+def _shutdown_all_agents():
+    """Best-effort shutdown of any agents that were created in this process."""
+    for agent in _active_agents:
+        try:
+            if hasattr(agent, "shutdown"):
+                asyncio.run(agent.shutdown())
+        except Exception:
+            pass
+    _active_agents.clear()
+
+
+def _setup_top_level_signal_handlers():
+    """Install process-wide signal handlers so Ctrl+C always triggers full background cleanup."""
+    def _handler(sig, frame):
+        print("\n[NeuralVoid] Received shutdown signal, cleaning up background work...")
+        _shutdown_all_agents()
+        sys.exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _handler)
+
+    # Extra safety net for normal process exit
+    atexit.register(_shutdown_all_agents)
+
+
 def main():
+    _setup_top_level_signal_handlers()
+
     # ───────────────────────────── CLI ─────────────────────────────
     args = CLIParser().parse()
 
@@ -60,6 +92,7 @@ def main():
         config=agent_config,
         app_root=app_root,
     )
+    _active_agents.append(agent)
     AgentFlow(agent)  # loading default workflows.
 
     # ── Headless mode ─────────────────────────────────────────────
@@ -91,6 +124,7 @@ def main():
                     config=a_cfg,
                     app_root=app_root,
                 )
+                _active_agents.append(a)
                 AgentFlow(a)  # register default workflows
                 hub.register_agent(a)
 
@@ -105,13 +139,21 @@ def main():
             print(f"   Prompt       : {prompt or '<none - listening mode>'}")
             print("-" * 60)
 
-            results = asyncio.run(
-                hub.deploy_all(
-                    prompt=prompt,
-                    system_prompt=loader.get_system_prompt(),
-                    max_tokens=max_tokens,
+            try:
+                results = asyncio.run(
+                    hub.deploy_all(
+                        prompt=prompt,
+                        system_prompt=loader.get_system_prompt(),
+                        max_tokens=max_tokens,
+                    )
                 )
-            )
+            finally:
+                # Best-effort full shutdown of all agents' background managers
+                for a in list(hub.agents.values()):
+                    try:
+                        asyncio.run(a.shutdown())
+                    except Exception:
+                        pass
             # Exit 0 only if every agent succeeded
             sys.exit(0 if all(results.values()) else 1)
 
