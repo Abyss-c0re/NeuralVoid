@@ -13,33 +13,14 @@ from neuralvoid.utils import find_app_root
 from neuralcore import ConfigLoader, get_clients, AgentFactory
 from neuralvoid.workflows.default_flow import AgentFlow
 
-
-_active_agents: list = []
-
-
-def _shutdown_all_agents():
-    """Best-effort shutdown of any agents that were created in this process."""
-    for agent in _active_agents:
-        try:
-            if hasattr(agent, "shutdown"):
-                asyncio.run(agent.shutdown())
-        except Exception:
-            pass
-    _active_agents.clear()
-
-
-def _setup_top_level_signal_handlers():
-    """Install process-wide signal handlers so Ctrl+C always triggers full background cleanup."""
-    def _handler(sig, frame):
-        print("\n[NeuralVoid] Received shutdown signal, cleaning up background work...")
-        _shutdown_all_agents()
-        sys.exit(0)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _handler)
-
-    # Extra safety net for normal process exit
-    atexit.register(_shutdown_all_agents)
+from .shutdown import (
+    _shutdown_event,
+    _current_tui_app,
+    _active_agents,
+    _shutdown_all_agents,
+    _setup_top_level_signal_handlers,
+    purge_everything,
+)
 
 
 def main():
@@ -208,7 +189,18 @@ def main():
         max_tokens=max_tokens,
         tool_info_level=tool_info_level,
     )
-    app.run()
+
+    _current_tui_app = app
+
+    try:
+        app.run()
+    finally:
+        _current_tui_app = None
+        print("\n[NeuralVoid] TUI closed — purging all background work...")
+        try:
+            asyncio.run(purge_everything())
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

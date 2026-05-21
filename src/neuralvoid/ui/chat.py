@@ -13,6 +13,7 @@ from neuralcore import Agent, registry, PromptBuilder, Logger
 
 from neuralvoid.ui.rendering import set_renderer_app, get_renderer
 from neuralvoid.ui.helpers import _build_tool_markdown
+from neuralvoid.shutdown import purge_everything, _shutdown_event
 
 logger = Logger.get_logger()
 
@@ -234,16 +235,29 @@ class LLMChatApp(App):
         self._agent_task = asyncio.create_task(self.run_chat_loop(), name="chat-loop")
         self.query_one("#input").focus()
 
+        # Watch for global shutdown signal (from Ctrl+C handler) and exit the TUI
+        asyncio.create_task(self._watch_for_shutdown(), name="tui-shutdown-watcher")
+
     async def on_unmount(self):
         logger.info("Shutting down agent and logger")
 
         try:
-            if hasattr(self, "agent") and self.agent:
-                await self.agent.shutdown()
+            await asyncio.wait_for(purge_everything(), timeout=6.0)
+        except asyncio.TimeoutError:
+            logger.warning("Purge timed out during TUI exit")
         except Exception as e:
-            logger.warning(f"Error during agent shutdown on unmount: {e}")
+            logger.warning(f"Error during purge on unmount: {e}")
 
         await Logger.shutdown()
+
+    async def _watch_for_shutdown(self):
+        """Watches the global shutdown event and forces the TUI to exit."""
+        try:
+            await _shutdown_event.wait()
+            logger.info("[TUI] Shutdown signal received — exiting")
+            self.exit()
+        except asyncio.CancelledError:
+            pass
 
     async def on_key(self, event: Key) -> None:
         if event.key == "escape":
@@ -539,14 +553,8 @@ class LLMChatApp(App):
             return
 
         if cmd == "exit":
-            self.chat.add(ChatMessage("system", "👋 Exiting..."))
-            await asyncio.sleep(0.2)
-            try:
-                if hasattr(self, "agent") and self.agent:
-                    await self.agent.shutdown()
-            except Exception as e:
-                logger.warning(f"Error during agent shutdown on exit command: {e}")
-            self.exit()
+            self.chat.add(ChatMessage("system", "👋 Exiting and purging background work..."))
+            asyncio.create_task(self._purge_and_exit())
             return
 
         if await self._handle_confirmation_response(value):
@@ -579,3 +587,10 @@ class LLMChatApp(App):
         self._current_assistant_msg = None
         self._current_pure_text = ""
         self._current_tool_buffer = ""
+
+    async def _purge_and_exit(self):
+        try:
+            await purge_everything()
+        except Exception:
+            pass
+        self.exit()
