@@ -4,6 +4,8 @@
 # --bundle avoids polluting parent dir with Core/Hub clones; everything lives inside NeuralVoid/ (the client) for portable editable dev
 #   - core/  = NeuralCore (editable)
 #   - hub/   = NeuralHub (editable)
+# Optional: --core-commit <ref> and --hub-commit <ref> to pin specific commits/branches/tags
+#   e.g. ./install.sh --dev --bundle --core-commit abc1234 --hub-commit feature/xyz
 # Client-side only, modular, reusable - no framework domain logic
 
 set -euo pipefail
@@ -11,18 +13,35 @@ set -euo pipefail
 echo "=== NeuralVoid Installation ==="
 
 # Parse arguments: support --dev (parent siblings) and --bundle (self-contained core/hub subfolders inside NeuralVoid)
+# Optional: --core-commit <ref> and --hub-commit <ref> to pin specific commits (used with --dev or --bundle)
 DEV_MODE=false
 BUNDLE_MODE=false
-for arg in "$@"; do
-  case "$arg" in
+CORE_COMMIT=""
+HUB_COMMIT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dev|-d|dev) DEV_MODE=true ;;
     --bundle|-b|bundle) BUNDLE_MODE=true ;;
+    --core-commit) shift; CORE_COMMIT="${1:-}" ;;
+    --hub-commit)  shift; HUB_COMMIT="${1:-}" ;;
   esac
+  shift
 done
 
 # Script directory (NeuralVoid root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Helper: checkout a specific commit/branch/tag inside a git repo
+checkout_ref() {
+  local repo_path="$1" ref="$2" label="$3"
+  if [ -n "$ref" ]; then
+    echo "🔀 Checking out $label @ $ref ..."
+    git -C "$repo_path" fetch --all --quiet 2>/dev/null || true
+    git -C "$repo_path" checkout "$ref"
+    echo "✅ $label now at $(git -C "$repo_path" rev-parse --short HEAD) ($ref)"
+  fi
+}
 
 if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
   if [ "$BUNDLE_MODE" = true ]; then
@@ -107,6 +126,9 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
     DO_PATCH_HUB=false
   fi
 
+  # Checkout specific hub commit if requested
+  checkout_ref "$NEURALHUB_PATH" "$HUB_COMMIT" "NeuralHub"
+
   # Patch only the internal bundle copy.
   # We change its dependency declaration to use the workspace form so that
   # uv is happy when the root already registered `core` as a workspace member.
@@ -167,6 +189,9 @@ if [ "$DEV_MODE" = true ] || [ "$BUNDLE_MODE" = true ]; then
       NEURALCORE_PATH="$CORE_CANDIDATE"
     fi
   fi
+
+  # Checkout specific core commit if requested
+  checkout_ref "$NEURALCORE_PATH" "$CORE_COMMIT" "NeuralCore"
 
   # ──────────────────────────────────────────────────────────────
   # Register the local packages using uv (each folder is its own project).
