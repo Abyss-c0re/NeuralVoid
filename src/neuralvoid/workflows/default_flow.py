@@ -3,11 +3,15 @@ from enum import Enum
 from neuralcore import AgentState, workflow, Logger, PromptBuilder
 from neuralcore.tasks.helpers import classify_intent
 
+# Proper import after relocation of the agentic task orchestrator:
+# TaskExecutor (renamed from TaskManager) now lives in NeuralHub.
+from neuralhub.tasks.manager import TaskExecutor
+
 logger = Logger.get_logger()
 
 
 # ===================================================================
-# CONDITIONS (only those actively used by TaskManager + loops)
+# CONDITIONS (only those actively used by TaskExecutor + loops)
 # ===================================================================
 @workflow.condition("goal_achieved")
 def goal_achieved(state: AgentState, args=None) -> bool:
@@ -75,9 +79,9 @@ def max_action_restarts_reached(state: AgentState, args=None):
 # ===================================================================
 @workflow.loop("goal_driven_loop", max_iterations=None, break_condition="goal_achieved")
 async def goal_driven_loop(agent, state: AgentState):
-    """Inner goal-driven loop – fully delegated to TaskManager."""
+    """Inner goal-driven loop – fully delegated to TaskExecutor (from NeuralHub)."""
     yield ("phase_changed", {"phase": "thinking"})
-    async for ev, pl in agent.task_manager.run_goal_driven_loop(
+    async for ev, pl in TaskExecutor(agent).run_goal_driven_loop(
         state, "goal_driven_loop"
     ):
         yield ev, pl
@@ -137,7 +141,7 @@ async def chat_tool_loop(agent, state: AgentState):
             state.reset_for_new_task(new_task=content)
 
             if not state.planned_tasks:
-                async for event, payload in agent.task_manager.plan():
+                async for event, payload in TaskExecutor(agent).plan():
                     yield event, payload
 
             async for event, payload in agent.execute_loop(
@@ -193,13 +197,13 @@ async def chat_tool_loop(agent, state: AgentState):
 async def pure_goal_driven(agent, state: AgentState):
     """
     Headless / non-chat goal-driven mode.
-    No message waiting, no casual branch – pure TaskManager execution.
+    No message waiting, no casual branch – pure TaskExecutor execution.
     """
     logger.info("[PURE GOAL-DRIVEN] Starting headless/task-only execution")
     yield ("phase_changed", {"phase": "goal_driven"})
 
     if not state.planned_tasks:
-        async for event, payload in agent.task_manager.plan():
+        async for event, payload in TaskExecutor(agent).plan():
             yield event, payload
 
     async for event, payload in agent.execute_loop(

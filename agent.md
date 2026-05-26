@@ -77,7 +77,7 @@ When the agent is launched with `deploy_agent` workflow:
 - It starts in `chat_tool_loop` (even in headless mode).
 - When you send a message via WS:
   - `classify_intent` decides **CASUAL** vs **TASK**.
-  - **TASK** → planning (`TaskManager.plan`) → `goal_driven_loop` → tool use → `goal_achieved` condition.
+  - **TASK** → planning (`TaskExecutor.plan` from NeuralHub) → `goal_driven_loop` → tool use → `goal_achieved` condition.
   - After completion it restarts back into `chat_tool_loop`.
 
 **Good test prompts:**
@@ -105,6 +105,8 @@ This is currently the most important area to verify.
 - `NeuralCore/src/neuralcore/cognition/knowledge.py` → how the watcher is submitted
 - `NeuralVoid/src/neuralvoid/cli/headless_agent.py` → runner shutdown path
 - `NeuralVoid/src/neuralvoid/main.py` → top-level signal/atexit handling
+- `NeuralHub/src/neuralhub/tasks/executor.py` → TaskExecutor (relocated agentic task orchestration; was TaskManager)
+- `NeuralVoid/src/neuralvoid/workflows/default_flow.py` → uses TaskExecutor via proper imports from neuralhub
 
 ### 4.3 Common Things to Verify
 
