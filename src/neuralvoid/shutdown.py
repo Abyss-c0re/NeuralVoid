@@ -11,7 +11,6 @@ The contract the user wants:
 """
 
 import asyncio
-import atexit
 import signal
 from typing import Any
 

@@ -101,7 +101,7 @@ This is currently the most important area to verify.
 
 **Key files to understand:**
 - `NeuralCore/src/neuralcore/core/background.py`
-- `NeuralCore/src/neuralcore/agents/core.py` → `shutdown()`
+- `NeuralCore/src/neuralcore/agents/agent.py` → `shutdown()`
 - `NeuralCore/src/neuralcore/cognition/knowledge.py` → how the watcher is submitted
 - `NeuralVoid/src/neuralvoid/cli/headless_agent.py` → runner shutdown path
 - `NeuralVoid/src/neuralvoid/main.py` → top-level signal/atexit handling
@@ -143,7 +143,7 @@ NeuralVoid/
 
 NeuralCore/
 ├── src/neuralcore/
-│   ├── agents/core.py             # Agent + BackgroundManager ownership + shutdown()
+│   ├── agents/agent.py            # Agent + BackgroundManager ownership + shutdown()
 │   ├── core/background.py         # The new internal work manager
 │   ├── cognition/                 # KnowledgeBase, ContextManager, Consolidator
 │   └── ...
