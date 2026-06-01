@@ -137,20 +137,32 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
     # ============================================================
 
     def _setup_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._sigint_count = 0
+
         def shutdown_handler(sig: Optional[int] = None):
+            self._sigint_count += 1
             name = signal.Signals(sig).name if sig else "Shutdown"
-            print(f"\n[{name}] Stopping agent...")
 
-            if self._stop_event:
-                self._stop_event.set()
-
-            self._write_status(
-                "shutting_down", message="Received shutdown signal", force=True
-            )
-
-            for task in asyncio.all_tasks(loop):
-                if task is not asyncio.current_task():
-                    task.cancel()
+            if self._sigint_count == 1:
+                print(f"\n[{name}] Stopping agent gracefully (first signal)...")
+                if self._stop_event:
+                    self._stop_event.set()
+                self._write_status(
+                    "shutting_down", message="Received shutdown signal - cleaning up...", force=True
+                )
+                # Do NOT blanket-cancel tasks here.
+                # Let the normal async generator exit + finally block in run()
+                # perform structured shutdown via agent.shutdown() + BackgroundManager.
+                # Blanket cancellation often leaves the loop in a bad state for
+                # subsequent await self.agent.shutdown() calls.
+            else:
+                print(f"\n[{name}] Second signal - forcing hard cancellation of remaining tasks.")
+                self._write_status("force_exit", message="Forced exit after second signal", force=True)
+                for task in asyncio.all_tasks(loop):
+                    if task is not asyncio.current_task() and not task.done():
+                        task.cancel()
+                # After hard cancel, we will still try best-effort shutdown below,
+                # then the main will force-exit.
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, shutdown_handler, sig)
@@ -172,6 +184,7 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
         self._success = False
         self._start_time = datetime.utcnow()
         self._stop_event = asyncio.Event()
+        self._sigint_count = 0
 
         loop = asyncio.get_running_loop()
         self._setup_signal_handlers(loop)
@@ -438,10 +451,16 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
         finally:
             self._running = False
 
-            # Full agent shutdown (BackgroundManager + all internal jobs like KB watcher, training, etc.)
-            # This is critical so that Ctrl+C on the user app actually stops background work.
+            # Full agent shutdown (BackgroundManager + DynamicCore jobs + KB watchers + training, etc.)
+            # Critical for clean Ctrl+C exit on --deploy.
             try:
-                await self.agent.shutdown()
+                await asyncio.wait_for(self.agent.shutdown(), timeout=9.0)
+            except asyncio.TimeoutError:
+                print("\n⚠️  Agent shutdown timed out (some background jobs may still be terminating).")
+                logger.warning("Agent shutdown timed out during final cleanup.")
+            except asyncio.CancelledError:
+                # We ourselves are being hard-cancelled — best effort only.
+                pass
             except Exception as e:
                 logger.warning(f"Error during agent.shutdown() in headless runner: {e}")
 

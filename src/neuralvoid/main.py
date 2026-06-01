@@ -130,9 +130,10 @@ def main():
                 )
             finally:
                 # Best-effort full shutdown of all agents' background managers
+                print("\n[NeuralVoid] Multi-agent deploy ending — shutting down background work...")
                 for a in list(hub.agents.values()):
                     try:
-                        asyncio.run(a.shutdown())
+                        asyncio.run(asyncio.wait_for(a.shutdown(), timeout=6.0))
                     except Exception:
                         pass
             # Exit 0 only if every agent succeeded
@@ -177,13 +178,32 @@ def main():
         print(f"   Max iterations: {max_iterations}")
         print("-" * 60)
 
-        success = asyncio.run(
-            runner.run(
-                prompt=prompt,
-                system_prompt=loader.get_system_prompt(),
-                max_tokens=max_tokens,
+        try:
+            success = asyncio.run(
+                runner.run(
+                    prompt=prompt,
+                    system_prompt=loader.get_system_prompt(),
+                    max_tokens=max_tokens,
+                )
             )
-        )
+        finally:
+            # Last-resort guaranteed cleanup for the single-agent --deploy path.
+            # Even if the runner's finally had issues (e.g. due to very hard cancellation),
+            # we still try one last time to shut everything down before the process exits.
+            print("\n[NeuralVoid] Ensuring all background work is stopped before exit...")
+            try:
+                # Fresh event loop for the final purge (the previous one may be torn down)
+                asyncio.run(asyncio.wait_for(agent.shutdown(), timeout=7.0))
+            except Exception as e:
+                print(f"[NeuralVoid] Final shutdown attempt had error (non-fatal): {e}")
+            # Clear any remaining tasks that might prevent clean interpreter exit
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                # Nothing more to schedule; just let it be collected
+            except Exception:
+                pass
+
         sys.exit(0 if success else 1)
 
     # ── Interactive UI mode ───────────────────────────────────────
