@@ -143,15 +143,29 @@ def main():
         # ────────────────────────────────────────────────────────
         from neuralvoid.cli.headless_agent import HeadlessAgentRunner
 
+        # Resolve render_events: CLI flag wins, then agent config, then app-level headless section.
+        # This matches the defensive pattern used for dynamic_core / cognition flags.
+        agent_cfg = agent_config or {}
+        app_cfg = loader.get_app_config() or {}
+
+        render_events = bool(
+            getattr(args, "render_events", False)
+            or agent_cfg.get("render_events", False)
+            or (agent_cfg.get("headless") or {}).get("render_events", False)
+            or ((app_cfg.get("headless") or {}) if isinstance(app_cfg, dict) else {}).get("render_events", False)
+            or ((app_cfg.get("app") or {}).get("headless") or {}).get("render_events", False)
+        )
+
         runner = HeadlessAgentRunner(
             agent=agent,
             status_file=args.status_file,
             pid_file=args.pid_file,
             status_update_throttle_sec=args.throttle_sec,
+            render_events=render_events,
         )
 
-        # Reuse pre-fetched agent_config (avoids redundant loader call)
-        agent_cfg = agent_config
+        # agent_cfg already resolved above for render_events (defensive config merge).
+        # Reuse the same dict for max_iterations / max_tokens.
 
         max_iterations = args.max_iterations or agent_cfg.get("max_iterations", 10)
         max_tokens = args.max_tokens or agent_cfg.get("max_tokens", 12000)

@@ -47,6 +47,7 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
         # When True the runner skips creating its own WebSocketBridge.
         # Used by AgentHub which manages bridges externally.
         skip_bridge: bool = False,
+        render_events: bool = False,
     ):
         # Delegate to the canonical implementation in NeuralHub.
         # Passing the explicit status/pid paths preserves the historical
@@ -60,6 +61,7 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
             skip_bridge=skip_bridge,
             # Explicit paths take precedence; do not inject an app_root here.
             app_root=None,
+            render_events=render_events,
         )
 
         # The base class already initializes all core state
@@ -304,10 +306,16 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
                 # In casual/chat mode the workflow yields "llm_response" with
                 # the full reply — previously this was silently ignored, so
                 # nothing printed to the terminal when a WS message arrived.
+                #
+                # Important: we also log the actual reply text via the central
+                # Logger so it reliably appears in ~/.neuralcore/neuralvoid.log
+                # during --deploy + websocat control (even when render_events=False).
                 elif event_type == "llm_response":
                     reply = payload.get("full_reply", "") if isinstance(payload, dict) else str(payload)
                     if reply:
                         print(f"\n💬 Agent reply:\n{reply}")
+                        # Always-on clean entry in the persistent log for controller visibility
+                        logger.info("Agent final response (llm_response):\n%s", reply)
                     self._write_status(
                         "running",
                         prompt=prompt,
@@ -316,8 +324,13 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
                         message="LLM response received",
                     )
 
-                elif event_type == "final_summary":
-                    print("\n📊 FINAL REPORT\n", str(payload).strip())
+                elif event_type in ("final_answer", "final_summary"):
+                    # Always-on clean rendering + logging of complete model output.
+                    # The heavy banner versions stay inside the render_events guard.
+                    text = str(payload) if payload is not None else ""
+                    print(f"\n🏁 Final answer / summary:\n{text}\n")
+                    if text.strip():
+                        logger.info("Agent final answer / summary:\n%s", text)
 
                 elif event_type == "finish":
                     reason = payload.get("reason", "unknown")
@@ -352,6 +365,65 @@ class HeadlessAgentRunner(_BaseHeadlessAgentRunner):
 
                 elif event_type == "warning":
                     print(f"\n⚠️ Warning: {payload}")
+
+                # ============================================================
+                # Optional verbose rendering (DynamicCore, final answers, etc.)
+                # Controlled by --render-events (CLI) or config (headless.render_events).
+                # Default OFF for clean --deploy + websocat controller-driven testing.
+                # ============================================================
+                if getattr(self, "render_events", False):
+                    if event_type.startswith("dynamic_core"):
+                        print(f"\n🧠 [DYNAMIC_CORE] {event_type}: {payload}")
+
+                    elif isinstance(payload, dict) and any(
+                        k in payload for k in ("dynamic_core", "workflow_plan", "decision_action")
+                    ):
+                        print(f"\n🧠 [DYNAMIC_CORE] {event_type}: {payload}")
+
+                    if event_type == "llm_response":
+                        reply = payload.get("full_reply", "") if isinstance(payload, dict) else str(payload)
+                        if reply and len(reply.strip()) > 5:
+                            print("\n" + "═" * 80)
+                            print("💬 AGENT FINAL RESPONSE / THOUGHT (readable by controller)")
+                            print("═" * 80)
+                            print(reply)
+                            print("═" * 80 + "\n")
+
+                    elif event_type in ("final_answer", "final_summary"):
+                        print("\n" + "🏁" * 30)
+                        print("FINAL ANSWER / SUMMARY FROM AGENT")
+                        print("🏁" * 30)
+                        print(payload)
+                        print("🏁" * 30 + "\n")
+
+                    elif event_type == "subtask_complete":
+                        print(f"\n✅✅✅ [SUBTASK COMPLETE] {payload} ✅✅✅\n")
+
+                    elif event_type == "validation_result":
+                        print(f"\n🔍🔍🔍 [VALIDATION] {payload} 🔍🔍🔍\n")
+
+                    elif "FINAL_ANSWER_COMPLETE" in str(payload):
+                        print("\n" + "🎯" * 15 + " FINAL_ANSWER_COMPLETE " + "🎯" * 15)
+                        print(payload)
+                        print("🎯" * 40 + "\n")
+
+                    # Extremely prominent DynamicCore section
+                    if event_type.startswith("dynamic_core") or (
+                        isinstance(payload, (dict, str))
+                        and any(
+                            x in str(payload).lower()
+                            for x in ["dynamic_core", "workflow_plan", "decision_action", "replan"]
+                        )
+                    ):
+                        print("\n" + "🧠" * 25)
+                        print(f"🧠 DYNAMIC CORE DECISION / PLAN / EVENT: {event_type}")
+                        print("🧠" * 25)
+                        print(payload)
+                        print("🧠" * 25 + "\n")
+
+                    # Very visible catch-all (the noisiest one)
+                    if event_type not in ("content_delta", "tool_call_delta"):
+                        print(f"\n[EVENT] {event_type} → {str(payload)[:1200]}\n")
 
         except asyncio.CancelledError:
             print("\n🛑 Cancelled by system")

@@ -130,6 +130,18 @@ class CLIParser:
             help="Maximum number of tokens per run (must be > 0, default: %(default)s)",
         )
 
+        deploy_group.add_argument(
+            "--render-events",
+            action="store_true",
+            default=False,
+            help=(
+                "Enable loud banner rendering for DynamicCore decisions, final answers, "
+                "validation results, and sub-task events during --deploy. "
+                "Off by default for clean controller-driven testing via WebSocket "
+                "(websocat). Use when you need maximum visibility into agent thinking."
+            ),
+        )
+
     # ─────────────────────────────────────────────
     def parse(self):
         return self.parser.parse_args()
